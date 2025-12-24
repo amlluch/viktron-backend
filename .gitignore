@@ -23,3 +23,6 @@ htmlcov/
 .vscode/
 tests/__pycache__/
 
+
+# Local / downloaded binaries
+awscliv2.zip
