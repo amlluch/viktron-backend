@@ -124,11 +124,15 @@ jobs:
           upload () {
             local file="$1"
             local key="$2"
-
-            aws s3 cp "$file" "s3://${bucket}/${key}"
-            local vid
-            vid="$(aws s3api head-object --bucket "${bucket}" --key "${key}" --query VersionId --output text)"
-            echo "$vid"
+          
+            # evita que 'aws s3 cp' ensucie stdout (que estamos capturando)
+            aws s3 cp "$file" "s3://${bucket}/${key}" --only-show-errors 1>/dev/null
+          
+            aws s3api head-object \
+              --bucket "${bucket}" \
+              --key "${key}" \
+              --query VersionId \
+              --output text | tr -d '\r\n'
           }
 
           layer_key="${prefix}/python-deps-layer.zip"
