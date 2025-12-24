@@ -1,0 +1,2 @@
+boto3
+boto3-stubs[full] ==1.42.16

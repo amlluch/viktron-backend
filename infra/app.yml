@@ -1,0 +1,143 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Viktron backend - Cognito auth (dev/prod) + lambdas
+
+Parameters:
+  Env:
+    Type: String
+    AllowedValues: [dev, prod]
+
+  ArtifactBucket:
+    Type: String
+
+  AuthArtifactKey:
+    Type: String
+  AuthArtifactVersion:
+    Type: String
+
+  AdminArtifactKey:
+    Type: String
+  AdminArtifactVersion:
+    Type: String
+
+Resources:
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "viktron-user-pool-${Env}"
+      UsernameAttributes: [ email ]
+      AutoVerifiedAttributes: [ email ]
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: !Sub "viktron-app-client-${Env}"
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ADMIN_USER_PASSWORD_AUTH
+        - REFRESH_TOKEN_AUTH
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 30
+
+  AuthLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "viktron-auth-lambda-role-${Env}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CognitoAuthCalls
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cognito-idp:AdminInitiateAuth
+                  - cognito-idp:AdminRespondToAuthChallenge
+                Resource: !GetAtt UserPool.Arn
+
+  AdminLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "viktron-admin-lambda-role-${Env}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CognitoAdminCalls
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cognito-idp:AdminCreateUser
+                  - cognito-idp:AdminSetUserPassword
+                Resource: !GetAtt UserPool.Arn
+
+  AuthLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "viktron-auth-${Env}"
+      Runtime: python3.12
+      Handler: handler.lambda_handler
+      Role: !GetAtt AuthLambdaRole.Arn
+      Timeout: 10
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref AuthArtifactKey
+        S3ObjectVersion: !Ref AuthArtifactVersion
+      Environment:
+        Variables:
+          USER_POOL_ID: !Ref UserPool
+          CLIENT_ID: !Ref UserPoolClient
+
+  AdminCreateUserLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "viktron-admin-create-user-${Env}"
+      Runtime: python3.12
+      Handler: handler.lambda_handler
+      Role: !GetAtt AdminLambdaRole.Arn
+      Timeout: 10
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref AdminArtifactKey
+        S3ObjectVersion: !Ref AdminArtifactVersion
+      Environment:
+        Variables:
+          USER_POOL_ID: !Ref UserPool
+
+Outputs:
+  UserPoolId:
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
+  AuthLambdaName:
+    Value: !Ref AuthLambda
+  AdminCreateUserLambdaName:
+    Value: !Ref AdminCreateUserLambda

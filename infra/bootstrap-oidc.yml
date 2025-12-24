@@ -1,0 +1,100 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: GitHub OIDC provider + deploy roles (dev/prod) + versioned artifacts bucket
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Description: GitHub org/user (owner)
+  GitHubRepo:
+    Type: String
+    Description: GitHub repo name (e.g. viktron-backend)
+  ArtifactBucketName:
+    Type: String
+    Description: Globally-unique S3 bucket name for build artifacts (versioned)
+
+Resources:
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      # Normalmente AWS lo acepta; si en tu cuenta diera error, lo ajustamos.
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+
+  ArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref ArtifactBucketName
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireNonCurrentVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
+          - Id: AbortMultipart
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+
+  # ---- DEV ROLE ----
+  GitHubDeployRoleDev:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "viktron-github-deploy-dev-${GitHubOrg}-${GitHubRepo}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref GitHubOidcProvider
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub:
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/develop"
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/feature/*"
+
+      ManagedPolicyArns:
+        # Para empezar rápido. Luego lo reducimos.
+        - arn:aws:iam::aws:policy/AdministratorAccess
+
+  # ---- PROD ROLE ----
+  GitHubDeployRoleProd:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "viktron-github-deploy-prod-${GitHubOrg}-${GitHubRepo}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref GitHubOidcProvider
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub:
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/tags/v*"
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/tags/*.*.*"
+
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+
+Outputs:
+  ArtifactsBucketName:
+    Value: !Ref ArtifactsBucket
+  DeployRoleArnDev:
+    Value: !GetAtt GitHubDeployRoleDev.Arn
+  DeployRoleArnProd:
+    Value: !GetAtt GitHubDeployRoleProd.Arn

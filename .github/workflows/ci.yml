@@ -1,0 +1,166 @@
+name: ci
+
+on:
+  push:
+    branches: [develop, "feature/**"]
+    tags: ["v*", "[0-9]+.[0-9]+.[0-9]+"]
+    paths:
+      - "src/**"
+      - "infra/**"
+      - ".github/workflows/**"
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: eu-west-1
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      env: ${{ steps.out.outputs.env }}
+      version: ${{ steps.out.outputs.version }}
+      artifact_bucket: ${{ steps.out.outputs.artifact_bucket }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: out
+        run: |
+          # Bucket name as repo variable (not secret). Fallback to secret if you prefer.
+          bucket="${{ vars.ARTIFACT_BUCKET }}"
+          if [[ -z "$bucket" ]]; then
+            bucket="${{ secrets.ARTIFACT_BUCKET }}"
+          fi
+
+          ref="${GITHUB_REF}"
+          if [[ "$ref" == refs/tags/* ]]; then
+            echo "env=prod" >> "$GITHUB_OUTPUT"
+            echo "version=${ref#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            echo "env=dev" >> "$GITHUB_OUTPUT"
+            branch="${ref#refs/heads/}"
+            safe_branch="$(echo "$branch" | tr '/_.' '-' )"
+            echo "version=${safe_branch}-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "artifact_bucket=$bucket" >> "$GITHUB_OUTPUT"
+
+  build_test_publish:
+    runs-on: ubuntu-latest
+    needs: meta
+    outputs:
+      auth_key: ${{ steps.pub.outputs.auth_key }}
+      auth_ver: ${{ steps.pub.outputs.auth_ver }}
+      admin_key: ${{ steps.pub.outputs.admin_key }}
+      admin_ver: ${{ steps.pub.outputs.admin_ver }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test deps + run tests
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+          pytest -q
+
+      - name: Build lambda zips
+        run: |
+          set -euo pipefail
+
+          build_lambda () {
+            name="$1"
+            dir="src/${name}/lambda"
+            echo "Building ${name} from ${dir}"
+
+            rm -rf "${dir}/build" "${dir}/${name}.zip"
+            mkdir -p "${dir}/build"
+
+            python -m pip install -r "${dir}/requirements.txt" -t "${dir}/build"
+            cp "${dir}/handler.py" "${dir}/build/handler.py"
+
+            (cd "${dir}/build" && zip -r "../${name}.zip" .)
+          }
+
+          build_lambda "auth"
+          build_lambda "admin_create_user"
+
+      - name: Configure AWS creds (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ needs.meta.outputs.env == 'prod' && secrets.AWS_ROLE_ARN_PROD || secrets.AWS_ROLE_ARN_DEV }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - id: pub
+        name: Publish artifacts to S3 (versioned)
+        run: |
+          set -euo pipefail
+
+          bucket="${{ needs.meta.outputs.artifact_bucket }}"
+          ver="${{ needs.meta.outputs.version }}"
+          env="${{ needs.meta.outputs.env }}"
+
+          if [[ "$env" == "prod" ]]; then
+            prefix="releases/${ver}"
+          else
+            prefix="dev/${ver}"
+          fi
+
+          upload_one () {
+            name="$1"
+            file="src/${name}/lambda/${name}.zip"
+            key="${prefix}/${name}.zip"
+
+            aws s3 cp "$file" "s3://${bucket}/${key}"
+            vid="$(aws s3api head-object --bucket "${bucket}" --key "${key}" --query VersionId --output text)"
+
+            echo "${name} uploaded: ${key} (version ${vid})"
+
+            if [[ "$name" == "auth" ]]; then
+              echo "auth_key=${key}" >> "$GITHUB_OUTPUT"
+              echo "auth_ver=${vid}" >> "$GITHUB_OUTPUT"
+            else
+              echo "admin_key=${key}" >> "$GITHUB_OUTPUT"
+              echo "admin_ver=${vid}" >> "$GITHUB_OUTPUT"
+            fi
+          }
+
+          upload_one "auth"
+          upload_one "admin_create_user"
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [meta, build_test_publish]
+    environment: ${{ needs.meta.outputs.env }} # usa Environments dev/prod si quieres approvals
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS creds (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ needs.meta.outputs.env == 'prod' && secrets.AWS_ROLE_ARN_PROD || secrets.AWS_ROLE_ARN_DEV }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy CloudFormation
+        run: |
+          set -euo pipefail
+
+          env="${{ needs.meta.outputs.env }}"
+          stack="viktron-${env}"
+          bucket="${{ needs.meta.outputs.artifact_bucket }}"
+
+          aws cloudformation deploy \
+            --stack-name "$stack" \
+            --template-file infra/app.yml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
+              Env="$env" \
+              ArtifactBucket="$bucket" \
+              AuthArtifactKey="${{ needs.build_test_publish.outputs.auth_key }}" \
+              AuthArtifactVersion="${{ needs.build_test_publish.outputs.auth_ver }}" \
+              AdminArtifactKey="${{ needs.build_test_publish.outputs.admin_key }}" \
+              AdminArtifactVersion="${{ needs.build_test_publish.outputs.admin_ver }}"
