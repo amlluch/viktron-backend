@@ -49,8 +49,8 @@ Resources:
       ClientName: !Sub "viktron-app-client-${Env}"
       GenerateSecret: false
       ExplicitAuthFlows:
-        - ADMIN_USER_PASSWORD_AUTH
-        - REFRESH_TOKEN_AUTH
+        - ALLOW_ADMIN_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
       TokenValidityUnits:
         AccessToken: minutes
         IdToken: minutes

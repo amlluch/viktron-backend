@@ -61,8 +61,7 @@ Resources:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
                 token.actions.githubusercontent.com:sub:
-                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/develop"
-                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/feature/*"
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:*"
 
       ManagedPolicyArns:
         # Para empezar rápido. Luego lo reducimos.
