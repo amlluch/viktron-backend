@@ -1,3 +1,5 @@
+.idea/
+*.iml
 # Python bytecode
 __pycache__/
 *.py[cod]
@@ -19,6 +21,5 @@ htmlcov/
 
 # IDEs
 .vscode/
-.idea/
 tests/__pycache__/
 
