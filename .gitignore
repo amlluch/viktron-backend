@@ -3,6 +3,7 @@
 # Python bytecode
 __pycache__/
 *.py[cod]
+*.pyc
 
 # Virtual environments
 .venv/
@@ -28,4 +29,5 @@ tests/__pycache__/
 awscliv2.zip
 
 # Local / downloaded binaries
-awscliv2.zip
+*.zip
+aws/

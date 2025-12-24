@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: Viktron backend - Cognito auth (dev/prod) + lambdas
+Description: Viktron backend - Cognito auth (dev/prod) + lambdas + python deps layer
 
 Parameters:
   Env:
@@ -9,14 +9,22 @@ Parameters:
   ArtifactBucket:
     Type: String
 
+  # --- auth lambda artifact ---
   AuthArtifactKey:
     Type: String
   AuthArtifactVersion:
     Type: String
 
+  # --- admin/create-user lambda artifact ---
   AdminArtifactKey:
     Type: String
   AdminArtifactVersion:
+    Type: String
+
+  # --- shared python deps layer artifact ---
+  LayerArtifactKey:
+    Type: String
+  LayerArtifactVersion:
     Type: String
 
 Resources:
@@ -50,6 +58,18 @@ Resources:
       AccessTokenValidity: 60
       IdTokenValidity: 60
       RefreshTokenValidity: 30
+
+  # -------- Layer: python dependencies ----------
+  PythonDepsLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: !Sub "viktron-python-deps-${Env}"
+      CompatibleRuntimes:
+        - python3.12
+      Content:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref LayerArtifactKey
+        S3ObjectVersion: !Ref LayerArtifactVersion
 
   AuthLambdaRole:
     Type: AWS::IAM::Role
@@ -102,10 +122,12 @@ Resources:
     Properties:
       FunctionName: !Sub "viktron-auth-${Env}"
       Runtime: python3.12
-      Handler: handler.lambda_handler
+      Handler: auth_lambda.lambda_handler
       Role: !GetAtt AuthLambdaRole.Arn
       Timeout: 10
       MemorySize: 256
+      Layers:
+        - !Ref PythonDepsLayer
       Code:
         S3Bucket: !Ref ArtifactBucket
         S3Key: !Ref AuthArtifactKey
@@ -120,10 +142,12 @@ Resources:
     Properties:
       FunctionName: !Sub "viktron-admin-create-user-${Env}"
       Runtime: python3.12
-      Handler: handler.lambda_handler
+      Handler: create_user_lambda.lambda_handler
       Role: !GetAtt AdminLambdaRole.Arn
       Timeout: 10
       MemorySize: 256
+      Layers:
+        - !Ref PythonDepsLayer
       Code:
         S3Bucket: !Ref ArtifactBucket
         S3Key: !Ref AdminArtifactKey
@@ -141,3 +165,5 @@ Outputs:
     Value: !Ref AuthLambda
   AdminCreateUserLambdaName:
     Value: !Ref AdminCreateUserLambda
+  PythonDepsLayerArn:
+    Value: !Ref PythonDepsLayer

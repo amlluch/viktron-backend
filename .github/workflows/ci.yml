@@ -7,6 +7,7 @@ on:
     paths:
       - "src/**"
       - "infra/**"
+      - "requirements*.txt"
       - ".github/workflows/**"
 
 permissions:
@@ -28,7 +29,6 @@ jobs:
 
       - id: out
         run: |
-          # Bucket name as repo variable (not secret). Fallback to secret if you prefer.
           bucket="${{ vars.ARTIFACT_BUCKET }}"
           if [[ -z "$bucket" ]]; then
             bucket="${{ secrets.ARTIFACT_BUCKET }}"
@@ -51,6 +51,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: meta
     outputs:
+      layer_key: ${{ steps.pub.outputs.layer_key }}
+      layer_ver: ${{ steps.pub.outputs.layer_ver }}
       auth_key: ${{ steps.pub.outputs.auth_key }}
       auth_ver: ${{ steps.pub.outputs.auth_ver }}
       admin_key: ${{ steps.pub.outputs.admin_key }}
@@ -62,32 +64,41 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install test deps + run tests
+      - name: Install dev deps + run tests
         run: |
           python -m pip install --upgrade pip
-          pip install pytest
+          if [[ -f requirements-dev.txt ]]; then
+            pip install -r requirements-dev.txt
+          else
+            pip install pytest
+          fi
           pytest -q
 
-      - name: Build lambda zips
+      - name: Build layer (requirements.txt) + lambda zips
         run: |
           set -euo pipefail
 
-          build_lambda () {
-            name="$1"
-            dir="src/${name}/lambda"
-            echo "Building ${name} from ${dir}"
+          rm -rf dist
+          mkdir -p dist
 
-            rm -rf "${dir}/build" "${dir}/${name}.zip"
-            mkdir -p "${dir}/build"
+          # ---- Layer zip (must contain "python/" folder at root) ----
+          mkdir -p dist/layer/python
+          if [[ -f requirements.txt ]]; then
+            pip install -r requirements.txt -t dist/layer/python
+          fi
+          (cd dist/layer && zip -r ../python-deps-layer.zip .)
 
-            python -m pip install -r "${dir}/requirements.txt" -t "${dir}/build"
-            cp "${dir}/handler.py" "${dir}/build/handler.py"
+          # ---- Auth lambda zip ----
+          test -f src/auth_lambda.py
+          mkdir -p dist/auth
+          cp src/auth_lambda.py dist/auth/auth_lambda.py
+          (cd dist/auth && zip -r ../auth.zip .)
 
-            (cd "${dir}/build" && zip -r "../${name}.zip" .)
-          }
-
-          build_lambda "auth"
-          build_lambda "admin_create_user"
+          # ---- Admin/create-user lambda zip ----
+          test -f src/create_user_lambda.py
+          mkdir -p dist/admin
+          cp src/create_user_lambda.py dist/admin/create_user_lambda.py
+          (cd dist/admin && zip -r ../admin_create_user.zip .)
 
       - name: Configure AWS creds (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -110,32 +121,35 @@ jobs:
             prefix="dev/${ver}"
           fi
 
-          upload_one () {
-            name="$1"
-            file="src/${name}/lambda/${name}.zip"
-            key="${prefix}/${name}.zip"
+          upload () {
+            local file="$1"
+            local key="$2"
 
             aws s3 cp "$file" "s3://${bucket}/${key}"
+            local vid
             vid="$(aws s3api head-object --bucket "${bucket}" --key "${key}" --query VersionId --output text)"
-
-            echo "${name} uploaded: ${key} (version ${vid})"
-
-            if [[ "$name" == "auth" ]]; then
-              echo "auth_key=${key}" >> "$GITHUB_OUTPUT"
-              echo "auth_ver=${vid}" >> "$GITHUB_OUTPUT"
-            else
-              echo "admin_key=${key}" >> "$GITHUB_OUTPUT"
-              echo "admin_ver=${vid}" >> "$GITHUB_OUTPUT"
-            fi
+            echo "$vid"
           }
 
-          upload_one "auth"
-          upload_one "admin_create_user"
+          layer_key="${prefix}/python-deps-layer.zip"
+          layer_vid="$(upload dist/python-deps-layer.zip "$layer_key")"
+          echo "layer_key=$layer_key" >> "$GITHUB_OUTPUT"
+          echo "layer_ver=$layer_vid" >> "$GITHUB_OUTPUT"
+
+          auth_key="${prefix}/auth.zip"
+          auth_vid="$(upload dist/auth.zip "$auth_key")"
+          echo "auth_key=$auth_key" >> "$GITHUB_OUTPUT"
+          echo "auth_ver=$auth_vid" >> "$GITHUB_OUTPUT"
+
+          admin_key="${prefix}/admin_create_user.zip"
+          admin_vid="$(upload dist/admin_create_user.zip "$admin_key")"
+          echo "admin_key=$admin_key" >> "$GITHUB_OUTPUT"
+          echo "admin_ver=$admin_vid" >> "$GITHUB_OUTPUT"
 
   deploy:
     runs-on: ubuntu-latest
     needs: [meta, build_test_publish]
-    environment: ${{ needs.meta.outputs.env }} # usa Environments dev/prod si quieres approvals
+    environment: ${{ needs.meta.outputs.env }}
     steps:
       - uses: actions/checkout@v4
 
@@ -160,6 +174,8 @@ jobs:
             --parameter-overrides \
               Env="$env" \
               ArtifactBucket="$bucket" \
+              LayerArtifactKey="${{ needs.build_test_publish.outputs.layer_key }}" \
+              LayerArtifactVersion="${{ needs.build_test_publish.outputs.layer_ver }}" \
               AuthArtifactKey="${{ needs.build_test_publish.outputs.auth_key }}" \
               AuthArtifactVersion="${{ needs.build_test_publish.outputs.auth_ver }}" \
               AdminArtifactKey="${{ needs.build_test_publish.outputs.admin_key }}" \
