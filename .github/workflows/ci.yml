@@ -45,18 +45,20 @@ jobs:
             exit 1
           fi
 
-          # Root domain + DNS stack name
+          # Root domain
           root_domain="${{ vars.ROOT_DOMAIN }}"
           if [[ -z "$root_domain" ]]; then
             echo "Missing vars.ROOT_DOMAIN"
             exit 1
           fi
+
+          # DNS stack name (optional)
           dns_stack="${{ vars.DNS_STACK_NAME }}"
           if [[ -z "$dns_stack" ]]; then
             dns_stack="viktron-dns"
           fi
 
-          # env + version
+          # env + version + CORS
           ref="${GITHUB_REF}"
           if [[ "$ref" == refs/tags/* ]]; then
             envname="prod"
@@ -135,29 +137,54 @@ jobs:
           cp src/create_user_lambda.py dist/admin/create_user_lambda.py
           (cd dist/admin && zip -r ../admin_create_user.zip .)
 
-      # -------- OIDC DEBUG (shows aud/sub) --------
-      - name: Debug OIDC token claims
+      # --- OIDC DEBUG (non-fatal) ---
+      - name: Debug OIDC token claims (non-fatal)
+        continue-on-error: true
+        shell: bash
         run: |
           set -euo pipefail
-          resp="$(curl -sSL \
-            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com")"
 
-          token="$(python - <<'PY'
-          import json,sys
-          print(json.loads(sys.stdin.read())["value"])
-          PY
-          <<< "$resp")"
+          if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" || -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]]; then
+            echo "OIDC env vars not available (missing id-token: write?)"
+            exit 0
+          fi
+
+          url="$ACTIONS_ID_TOKEN_REQUEST_URL"
+          sep="?"
+          if [[ "$url" == *"?"* ]]; then sep="&"; fi
+          req_url="${url}${sep}audience=sts.amazonaws.com"
+
+          resp="$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$req_url" || true)"
+          if [[ -z "$resp" ]]; then
+            echo "OIDC token response is empty"
+            exit 0
+          fi
+
+          python - <<'PY' "$resp"
+          import json, sys, base64
+          raw = sys.argv[1]
+          try:
+            obj = json.loads(raw)
+          except Exception as e:
+            print("OIDC response is not JSON:", raw[:200])
+            raise
           
-                    python - <<'PY'
-          import base64, json, sys
-          t=sys.argv[1]
-          payload=t.split(".")[1]
-          payload += "="*((4-len(payload)%4)%4)
-          claims=json.loads(base64.urlsafe_b64decode(payload))
+          token = obj.get("value")
+          if not token:
+            print("No 'value' in response:", obj)
+            sys.exit(0)
+          
+          parts = token.split(".")
+          if len(parts) < 2:
+            print("Token does not look like JWT")
+            sys.exit(0)
+          
+          payload = parts[1]
+          payload += "=" * ((4 - len(payload) % 4) % 4)
+          claims = json.loads(base64.urlsafe_b64decode(payload))
           print("aud:", claims.get("aud"))
           print("sub:", claims.get("sub"))
-          PY "$token"
+          PY
 
       - name: Configure AWS creds (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -206,18 +233,17 @@ jobs:
           echo "admin_key=$admin_key" >> "$GITHUB_OUTPUT"
           echo "admin_ver=$admin_vid" >> "$GITHUB_OUTPUT"
 
-  # Ensures DNS stack exists (HostedZone + wildcard cert).
-  # Uses the PROD role (DNS is shared), and only creates it if it doesn't exist.
   deploy_dns:
     runs-on: ubuntu-latest
     needs: meta
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure AWS creds (OIDC) - PROD for DNS
+      - name: Configure AWS creds (OIDC) - DNS
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN_PROD }}
+          # Use the matching role for the env (avoids assuming PROD role during dev)
+          role-to-assume: ${{ needs.meta.outputs.env == 'prod' && secrets.AWS_ROLE_ARN_PROD || secrets.AWS_ROLE_ARN_DEV }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Ensure DNS stack exists (create once)
@@ -236,7 +262,8 @@ jobs:
             --stack-name "$dns_stack" \
             --template-file infra/dns.yml \
             --parameter-overrides \
-              HostedZoneName="$root_domain"
+              HostedZoneName="$root_domain" \
+            --capabilities CAPABILITY_NAMED_IAM
 
   deploy:
     runs-on: ubuntu-latest
@@ -245,29 +272,50 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # -------- OIDC DEBUG (shows aud/sub) --------
-      - name: Debug OIDC token claims
+      # --- OIDC DEBUG (non-fatal) ---
+      - name: Debug OIDC token claims (non-fatal)
+        continue-on-error: true
+        shell: bash
         run: |
           set -euo pipefail
-          resp="$(curl -sSL \
-            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com")"
 
-          token="$(python - <<'PY'
-          import json,sys
-          print(json.loads(sys.stdin.read())["value"])
-          PY
-          <<< "$resp")"
+          if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" || -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]]; then
+            echo "OIDC env vars not available (missing id-token: write?)"
+            exit 0
+          fi
+
+          url="$ACTIONS_ID_TOKEN_REQUEST_URL"
+          sep="?"
+          if [[ "$url" == *"?"* ]]; then sep="&"; fi
+          req_url="${url}${sep}audience=sts.amazonaws.com"
+
+          resp="$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$req_url" || true)"
+          if [[ -z "$resp" ]]; then
+            echo "OIDC token response is empty"
+            exit 0
+          fi
+
+          python - <<'PY' "$resp"
+          import json, sys, base64
+          raw = sys.argv[1]
+          try:
+            obj = json.loads(raw)
+          except Exception:
+            print("OIDC response is not JSON:", raw[:200])
+            sys.exit(0)
           
-                    python - <<'PY'
-          import base64, json, sys
-          t=sys.argv[1]
-          payload=t.split(".")[1]
-          payload += "="*((4-len(payload)%4)%4)
-          claims=json.loads(base64.urlsafe_b64decode(payload))
+          token = obj.get("value")
+          if not token:
+            print("No 'value' in response:", obj)
+            sys.exit(0)
+          
+          parts = token.split(".")
+          payload = parts[1]
+          payload += "=" * ((4 - len(payload) % 4) % 4)
+          claims = json.loads(base64.urlsafe_b64decode(payload))
           print("aud:", claims.get("aud"))
           print("sub:", claims.get("sub"))
-          PY "$token"
+          PY
 
       - name: Configure AWS creds (OIDC)
         uses: aws-actions/configure-aws-credentials@v4

@@ -61,9 +61,10 @@ Resources:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
                 token.actions.githubusercontent.com:sub:
-                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/tags/v*"
-                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/tags/*.*.*"
-                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:environment:prod"
+                  # If the job uses GitHub Environments
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:environment:dev"
+                  # If the job does NOT use environments (classic branch refs)
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/*"
 
       ManagedPolicyArns:
         # Para empezar rápido. Luego lo reducimos.
@@ -86,8 +87,10 @@ Resources:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
                 token.actions.githubusercontent.com:sub:
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:environment:prod"
                   - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/tags/v*"
                   - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/tags/*.*.*"
+
 
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AdministratorAccess
