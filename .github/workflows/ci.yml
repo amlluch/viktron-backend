@@ -8,6 +8,7 @@ on:
       - "src/**"
       - "infra/**"
       - "requirements*.txt"
+      - "requirements-dev*.txt"
       - ".github/workflows/**"
 
 permissions:
@@ -24,6 +25,9 @@ jobs:
       env: ${{ steps.out.outputs.env }}
       version: ${{ steps.out.outputs.version }}
       artifact_bucket: ${{ steps.out.outputs.artifact_bucket }}
+      root_domain: ${{ steps.out.outputs.root_domain }}
+      dns_stack: ${{ steps.out.outputs.dns_stack }}
+      cors_allowed_origins: ${{ steps.out.outputs.cors_allowed_origins }}
     steps:
       - uses: actions/checkout@v4
 
@@ -31,23 +35,51 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Artifact bucket
           bucket="${{ vars.ARTIFACT_BUCKET }}"
           if [[ -z "$bucket" ]]; then
             bucket="${{ secrets.ARTIFACT_BUCKET }}"
           fi
-
-          ref="${GITHUB_REF}"
-          if [[ "$ref" == refs/tags/* ]]; then
-            echo "env=prod" >> "$GITHUB_OUTPUT"
-            echo "version=${ref#refs/tags/}" >> "$GITHUB_OUTPUT"
-          else
-            echo "env=dev" >> "$GITHUB_OUTPUT"
-            branch="${ref#refs/heads/}"
-            safe_branch="$(echo "$branch" | tr '/_.' '-' )"
-            echo "version=${safe_branch}-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          if [[ -z "$bucket" ]]; then
+            echo "Missing ARTIFACT_BUCKET (vars or secrets)"
+            exit 1
           fi
 
+          # Root domain + DNS stack name
+          root_domain="${{ vars.ROOT_DOMAIN }}"
+          if [[ -z "$root_domain" ]]; then
+            echo "Missing vars.ROOT_DOMAIN"
+            exit 1
+          fi
+          dns_stack="${{ vars.DNS_STACK_NAME }}"
+          if [[ -z "$dns_stack" ]]; then
+            dns_stack="viktron-dns"
+          fi
+
+          # env + version
+          ref="${GITHUB_REF}"
+          if [[ "$ref" == refs/tags/* ]]; then
+            envname="prod"
+            version="${ref#refs/tags/}"
+            cors="${{ vars.CORS_ALLOWED_ORIGINS_PROD }}"
+          else
+            envname="dev"
+            branch="${ref#refs/heads/}"
+            safe_branch="$(echo "$branch" | tr '/_.' '-' )"
+            version="${safe_branch}-${GITHUB_SHA::7}"
+            cors="${{ vars.CORS_ALLOWED_ORIGINS_DEV }}"
+          fi
+
+          if [[ -z "$cors" ]]; then
+            cors="http://localhost:4200"
+          fi
+
+          echo "env=$envname" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "artifact_bucket=$bucket" >> "$GITHUB_OUTPUT"
+          echo "root_domain=$root_domain" >> "$GITHUB_OUTPUT"
+          echo "dns_stack=$dns_stack" >> "$GITHUB_OUTPUT"
+          echo "cors_allowed_origins=$cors" >> "$GITHUB_OUTPUT"
 
   build_test_publish:
     runs-on: ubuntu-latest
@@ -103,6 +135,30 @@ jobs:
           cp src/create_user_lambda.py dist/admin/create_user_lambda.py
           (cd dist/admin && zip -r ../admin_create_user.zip .)
 
+      # -------- OIDC DEBUG (shows aud/sub) --------
+      - name: Debug OIDC token claims
+        run: |
+          set -euo pipefail
+          resp="$(curl -sSL \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com")"
+
+          token="$(python - <<'PY'
+import json,sys
+print(json.loads(sys.stdin.read())["value"])
+PY
+<<< "$resp")"
+
+          python - <<'PY'
+import base64, json, sys
+t=sys.argv[1]
+payload=t.split(".")[1]
+payload += "="*((4-len(payload)%4)%4)
+claims=json.loads(base64.urlsafe_b64decode(payload))
+print("aud:", claims.get("aud"))
+print("sub:", claims.get("sub"))
+PY "$token"
+
       - name: Configure AWS creds (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -116,9 +172,9 @@ jobs:
 
           bucket="${{ needs.meta.outputs.artifact_bucket }}"
           ver="${{ needs.meta.outputs.version }}"
-          env="${{ needs.meta.outputs.env }}"
+          envname="${{ needs.meta.outputs.env }}"
 
-          if [[ "$env" == "prod" ]]; then
+          if [[ "$envname" == "prod" ]]; then
             prefix="releases/${ver}"
           else
             prefix="dev/${ver}"
@@ -150,33 +206,26 @@ jobs:
           echo "admin_key=$admin_key" >> "$GITHUB_OUTPUT"
           echo "admin_ver=$admin_vid" >> "$GITHUB_OUTPUT"
 
+  # Ensures DNS stack exists (HostedZone + wildcard cert).
+  # Uses the PROD role (DNS is shared), and only creates it if it doesn't exist.
   deploy_dns:
     runs-on: ubuntu-latest
     needs: meta
     steps:
       - uses: actions/checkout@v4
 
-      # DNS/ACM suelen vivir "globales" en la cuenta, así que uso siempre el role PROD
-      - name: Configure AWS creds (OIDC) - DNS role
+      - name: Configure AWS creds (OIDC) - PROD for DNS
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ needs.meta.outputs.env == 'prod' && secrets.AWS_ROLE_ARN_PROD || secrets.AWS_ROLE_ARN_DEV }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_PROD }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Ensure DNS stack exists (create once)
         run: |
           set -euo pipefail
 
-          root_domain="${{ vars.ROOT_DOMAIN }}"
-          if [[ -z "$root_domain" ]]; then
-            echo "Missing vars.ROOT_DOMAIN"
-            exit 1
-          fi
-
-          dns_stack="${{ vars.DNS_STACK_NAME }}"
-          if [[ -z "$dns_stack" ]]; then
-            dns_stack="viktron-dns"
-          fi
+          dns_stack="${{ needs.meta.outputs.dns_stack }}"
+          root_domain="${{ needs.meta.outputs.root_domain }}"
 
           if aws cloudformation describe-stacks --stack-name "$dns_stack" >/dev/null 2>&1; then
             echo "$dns_stack already exists, skipping."
@@ -196,6 +245,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # -------- OIDC DEBUG (shows aud/sub) --------
+      - name: Debug OIDC token claims
+        run: |
+          set -euo pipefail
+          resp="$(curl -sSL \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com")"
+
+          token="$(python - <<'PY'
+import json,sys
+print(json.loads(sys.stdin.read())["value"])
+PY
+<<< "$resp")"
+
+          python - <<'PY'
+import base64, json, sys
+t=sys.argv[1]
+payload=t.split(".")[1]
+payload += "="*((4-len(payload)%4)%4)
+claims=json.loads(base64.urlsafe_b64decode(payload))
+print("aud:", claims.get("aud"))
+print("sub:", claims.get("sub"))
+PY "$token"
+
       - name: Configure AWS creds (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -207,10 +280,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          dns_stack="${{ vars.DNS_STACK_NAME }}"
-          if [[ -z "$dns_stack" ]]; then
-            dns_stack="viktron-dns"
-          fi
+          dns_stack="${{ needs.meta.outputs.dns_stack }}"
 
           zone_id="$(aws cloudformation describe-stacks \
             --stack-name "$dns_stack" \
@@ -233,31 +303,18 @@ jobs:
         run: |
           set -euo pipefail
 
-          env="${{ needs.meta.outputs.env }}"
-          stack="viktron-${env}"
+          envname="${{ needs.meta.outputs.env }}"
+          stack="viktron-${envname}"
           bucket="${{ needs.meta.outputs.artifact_bucket }}"
-
-          root_domain="${{ vars.ROOT_DOMAIN }}"
-          if [[ -z "$root_domain" ]]; then
-            echo "Missing vars.ROOT_DOMAIN"
-            exit 1
-          fi
-
-          if [[ "$env" == "prod" ]]; then
-            allowed_origins="${{ vars.CORS_ALLOWED_ORIGINS_PROD }}"
-          else
-            allowed_origins="${{ vars.CORS_ALLOWED_ORIGINS_DEV }}"
-          fi
-          if [[ -z "$allowed_origins" ]]; then
-            allowed_origins="http://localhost:4200"
-          fi
+          root_domain="${{ needs.meta.outputs.root_domain }}"
+          allowed_origins="${{ needs.meta.outputs.cors_allowed_origins }}"
 
           aws cloudformation deploy \
             --stack-name "$stack" \
             --template-file infra/app.yml \
             --capabilities CAPABILITY_NAMED_IAM \
             --parameter-overrides \
-              Env="$env" \
+              Env="$envname" \
               ArtifactBucket="$bucket" \
               HostedZoneId="${{ steps.dns.outputs.hosted_zone_id }}" \
               HostedZoneName="$root_domain" \
