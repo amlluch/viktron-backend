@@ -144,20 +144,20 @@ jobs:
             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com")"
 
           token="$(python - <<'PY'
-import json,sys
-print(json.loads(sys.stdin.read())["value"])
-PY
-<<< "$resp")"
-
-          python - <<'PY'
-import base64, json, sys
-t=sys.argv[1]
-payload=t.split(".")[1]
-payload += "="*((4-len(payload)%4)%4)
-claims=json.loads(base64.urlsafe_b64decode(payload))
-print("aud:", claims.get("aud"))
-print("sub:", claims.get("sub"))
-PY "$token"
+          import json,sys
+          print(json.loads(sys.stdin.read())["value"])
+          PY
+          <<< "$resp")"
+          
+                    python - <<'PY'
+          import base64, json, sys
+          t=sys.argv[1]
+          payload=t.split(".")[1]
+          payload += "="*((4-len(payload)%4)%4)
+          claims=json.loads(base64.urlsafe_b64decode(payload))
+          print("aud:", claims.get("aud"))
+          print("sub:", claims.get("sub"))
+          PY "$token"
 
       - name: Configure AWS creds (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -254,20 +254,20 @@ PY "$token"
             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com")"
 
           token="$(python - <<'PY'
-import json,sys
-print(json.loads(sys.stdin.read())["value"])
-PY
-<<< "$resp")"
-
-          python - <<'PY'
-import base64, json, sys
-t=sys.argv[1]
-payload=t.split(".")[1]
-payload += "="*((4-len(payload)%4)%4)
-claims=json.loads(base64.urlsafe_b64decode(payload))
-print("aud:", claims.get("aud"))
-print("sub:", claims.get("sub"))
-PY "$token"
+          import json,sys
+          print(json.loads(sys.stdin.read())["value"])
+          PY
+          <<< "$resp")"
+          
+                    python - <<'PY'
+          import base64, json, sys
+          t=sys.argv[1]
+          payload=t.split(".")[1]
+          payload += "="*((4-len(payload)%4)%4)
+          claims=json.loads(base64.urlsafe_b64decode(payload))
+          print("aud:", claims.get("aud"))
+          print("sub:", claims.get("sub"))
+          PY "$token"
 
       - name: Configure AWS creds (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
