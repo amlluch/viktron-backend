@@ -19,7 +19,6 @@ Resources:
       Url: https://token.actions.githubusercontent.com
       ClientIdList:
         - sts.amazonaws.com
-      # Normalmente AWS lo acepta; si en tu cuenta diera error, lo ajustamos.
       ThumbprintList:
         - 6938fd4d98bab03faadb97b34396831e3780aea1
 
@@ -61,13 +60,11 @@ Resources:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
                 token.actions.githubusercontent.com:sub:
-                  # If the job uses GitHub Environments
-                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:environment:dev"
-                  # If the job does NOT use environments (classic branch refs)
+                  # jobs without GitHub Environments
                   - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/*"
-
+                  # jobs with GitHub Environments
+                  - !Sub "repo:${GitHubOrg}/${GitHubRepo}:environment:dev"
       ManagedPolicyArns:
-        # Para empezar rápido. Luego lo reducimos.
         - arn:aws:iam::aws:policy/AdministratorAccess
 
   # ---- PROD ROLE ----
@@ -90,8 +87,6 @@ Resources:
                   - !Sub "repo:${GitHubOrg}/${GitHubRepo}:environment:prod"
                   - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/tags/v*"
                   - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/tags/*.*.*"
-
-
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AdministratorAccess
 
