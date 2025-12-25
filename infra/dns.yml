@@ -1,0 +1,33 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Viktron DNS shared - Route53 Hosted Zone + ACM wildcard certificate
+
+Parameters:
+  HostedZoneName:
+    Type: String
+    Default: "anonvpn.net"
+
+Resources:
+  HostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Ref HostedZoneName
+
+  WildcardCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Sub "*.${HostedZoneName}"
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Sub "*.${HostedZoneName}"
+          HostedZoneId: !Ref HostedZone
+
+Outputs:
+  HostedZoneId:
+    Value: !Ref HostedZone
+
+  HostedZoneNameServers:
+    Description: "Set these NS at your registrar for the domain to delegate DNS to Route53"
+    Value: !Join [",", !GetAtt HostedZone.NameServers]
+
+  CertificateArn:
+    Value: !Ref WildcardCertificate

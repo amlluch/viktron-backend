@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: Viktron backend - Cognito auth (dev/prod) + lambdas + python deps layer
+Description: Viktron backend - Cognito + admin API (HTTP API) + custom domain + lambdas + python deps layer
 
 Parameters:
   Env:
@@ -9,25 +9,44 @@ Parameters:
   ArtifactBucket:
     Type: String
 
-  # --- auth lambda artifact ---
   AuthArtifactKey:
     Type: String
   AuthArtifactVersion:
     Type: String
 
-  # --- admin/create-user lambda artifact ---
   AdminArtifactKey:
     Type: String
   AdminArtifactVersion:
     Type: String
 
-  # --- shared python deps layer artifact ---
   LayerArtifactKey:
     Type: String
   LayerArtifactVersion:
     Type: String
 
+  HostedZoneId:
+    Type: String
+    Description: "Route53 hosted zone id for anonvpn.net (from viktron-dns stack)"
+
+  HostedZoneName:
+    Type: String
+    Default: "anonvpn.net"
+
+  CertificateArn:
+    Type: String
+    Description: "ACM certificate ARN for *.anonvpn.net (from viktron-dns stack)"
+
+  AllowedOrigins:
+    Type: CommaDelimitedList
+    Default: "http://localhost:4200"
+
+Conditions:
+  IsProd: !Equals [!Ref Env, "prod"]
+
 Resources:
+  # -------------------------
+  # Cognito
+  # -------------------------
   UserPool:
     Type: AWS::Cognito::UserPool
     Properties:
@@ -49,8 +68,9 @@ Resources:
       ClientName: !Sub "viktron-app-client-${Env}"
       GenerateSecret: false
       ExplicitAuthFlows:
-        - ALLOW_ADMIN_USER_PASSWORD_AUTH
+        - ALLOW_USER_SRP_AUTH
         - ALLOW_REFRESH_TOKEN_AUTH
+        # - ALLOW_USER_PASSWORD_AUTH  # enable if you want non-SRP client login
       TokenValidityUnits:
         AccessToken: minutes
         IdToken: minutes
@@ -59,18 +79,29 @@ Resources:
       IdTokenValidity: 60
       RefreshTokenValidity: 30
 
-  # -------- Layer: python dependencies ----------
+  AdminsGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: "admins"
+      Description: "Viktron administrators"
+      UserPoolId: !Ref UserPool
+
+  # -------------------------
+  # Layer: python dependencies
+  # -------------------------
   PythonDepsLayer:
     Type: AWS::Lambda::LayerVersion
     Properties:
       LayerName: !Sub "viktron-python-deps-${Env}"
-      CompatibleRuntimes:
-        - python3.12
+      CompatibleRuntimes: [ python3.12 ]
       Content:
         S3Bucket: !Ref ArtifactBucket
         S3Key: !Ref LayerArtifactKey
         S3ObjectVersion: !Ref LayerArtifactVersion
 
+  # -------------------------
+  # IAM roles
+  # -------------------------
   AuthLambdaRole:
     Type: AWS::IAM::Role
     Properties:
@@ -115,8 +146,13 @@ Resources:
                 Action:
                   - cognito-idp:AdminCreateUser
                   - cognito-idp:AdminSetUserPassword
+                  - cognito-idp:ListUsers
+                  - cognito-idp:AdminGetUser
                 Resource: !GetAtt UserPool.Arn
 
+  # -------------------------
+  # Lambdas
+  # -------------------------
   AuthLambda:
     Type: AWS::Lambda::Function
     Properties:
@@ -126,8 +162,7 @@ Resources:
       Role: !GetAtt AuthLambdaRole.Arn
       Timeout: 10
       MemorySize: 256
-      Layers:
-        - !Ref PythonDepsLayer
+      Layers: [ !Ref PythonDepsLayer ]
       Code:
         S3Bucket: !Ref ArtifactBucket
         S3Key: !Ref AuthArtifactKey
@@ -146,8 +181,7 @@ Resources:
       Role: !GetAtt AdminLambdaRole.Arn
       Timeout: 10
       MemorySize: 256
-      Layers:
-        - !Ref PythonDepsLayer
+      Layers: [ !Ref PythonDepsLayer ]
       Code:
         S3Bucket: !Ref ArtifactBucket
         S3Key: !Ref AdminArtifactKey
@@ -155,15 +189,121 @@ Resources:
       Environment:
         Variables:
           USER_POOL_ID: !Ref UserPool
+          ADMIN_GROUP: "admins"
+
+  # -------------------------
+  # HTTP API Gateway + JWT authorizer
+  # -------------------------
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub "viktron-api-${Env}"
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins: !Ref AllowedOrigins
+        AllowMethods: [ GET, POST, OPTIONS ]
+        AllowHeaders: [ authorization, content-type ]
+        AllowCredentials: true
+        MaxAge: 3600
+
+  HttpApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: "$default"
+      AutoDeploy: true
+
+  JwtAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref HttpApi
+      Name: !Sub "viktron-jwt-authorizer-${Env}"
+      AuthorizerType: JWT
+      IdentitySource:
+        - "$request.header.Authorization"
+      JwtConfiguration:
+        Audience:
+          - !Ref UserPoolClient
+        Issuer: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}"
+
+  AdminCreateUserIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt AdminCreateUserLambda.Arn
+      PayloadFormatVersion: "2.0"
+
+  AdminCreateUserRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /admin/users"
+      Target: !Sub "integrations/${AdminCreateUserIntegration}"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+
+  AllowApiInvokeAdminCreateUser:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !Ref AdminCreateUserLambda
+      Principal: "apigateway.amazonaws.com"
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/POST/admin/users"
+
+  # -------------------------
+  # Custom domain + Route53 record
+  # -------------------------
+  ApiDomainName:
+    Type: AWS::ApiGatewayV2::DomainName
+    Properties:
+      DomainName: !If
+        - IsProd
+        - !Sub "api.${HostedZoneName}"
+        - !Sub "api-dev.${HostedZoneName}"
+      DomainNameConfigurations:
+        - EndpointType: REGIONAL
+          SecurityPolicy: TLS_1_2
+          CertificateArn: !Ref CertificateArn
+
+  ApiMapping:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    Properties:
+      ApiId: !Ref HttpApi
+      DomainName: !Ref ApiDomainName
+      Stage: !Ref HttpApiStage
+
+  ApiDomainRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !If
+        - IsProd
+        - !Sub "api.${HostedZoneName}"
+        - !Sub "api-dev.${HostedZoneName}"
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt ApiDomainName.RegionalDomainName
+        HostedZoneId: !GetAtt ApiDomainName.RegionalHostedZoneId
 
 Outputs:
   UserPoolId:
     Value: !Ref UserPool
+
   UserPoolClientId:
     Value: !Ref UserPoolClient
-  AuthLambdaName:
-    Value: !Ref AuthLambda
-  AdminCreateUserLambdaName:
-    Value: !Ref AdminCreateUserLambda
-  PythonDepsLayerArn:
-    Value: !Ref PythonDepsLayer
+
+  ApiEndpointExecuteApi:
+    Value: !GetAtt HttpApi.ApiEndpoint
+
+  ApiCustomDomain:
+    Value: !If
+      - IsProd
+      - !Sub "https://api.${HostedZoneName}"
+      - !Sub "https://api-dev.${HostedZoneName}"
+
+  AdminUsersEndpoint:
+    Value: !If
+      - IsProd
+      - !Sub "https://api.${HostedZoneName}/admin/users"
+      - !Sub "https://api-dev.${HostedZoneName}/admin/users"

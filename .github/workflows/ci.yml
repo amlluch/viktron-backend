@@ -81,20 +81,17 @@ jobs:
           rm -rf dist
           mkdir -p dist
 
-          # ---- Layer zip (must contain "python/" folder at root) ----
           mkdir -p dist/layer/python
           if [[ -f requirements.txt ]]; then
             pip install -r requirements.txt -t dist/layer/python
           fi
           (cd dist/layer && zip -r ../python-deps-layer.zip .)
 
-          # ---- Auth lambda zip ----
           test -f src/auth_lambda.py
           mkdir -p dist/auth
           cp src/auth_lambda.py dist/auth/auth_lambda.py
           (cd dist/auth && zip -r ../auth.zip .)
 
-          # ---- Admin/create-user lambda zip ----
           test -f src/create_user_lambda.py
           mkdir -p dist/admin
           cp src/create_user_lambda.py dist/admin/create_user_lambda.py
@@ -124,10 +121,7 @@ jobs:
           upload () {
             local file="$1"
             local key="$2"
-          
-            # evita que 'aws s3 cp' ensucie stdout (que estamos capturando)
             aws s3 cp "$file" "s3://${bucket}/${key}" --only-show-errors 1>/dev/null
-          
             aws s3api head-object \
               --bucket "${bucket}" \
               --key "${key}" \
@@ -150,9 +144,31 @@ jobs:
           echo "admin_key=$admin_key" >> "$GITHUB_OUTPUT"
           echo "admin_ver=$admin_vid" >> "$GITHUB_OUTPUT"
 
+  deploy_dns:
+    runs-on: ubuntu-latest
+    needs: meta
+    if: needs.meta.outputs.env == 'prod'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS creds (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_PROD }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy DNS CloudFormation (HostedZone + Wildcard cert)
+        run: |
+          set -euo pipefail
+          aws cloudformation deploy \
+            --stack-name "viktron-dns" \
+            --template-file infra/dns.yml \
+            --parameter-overrides \
+              HostedZoneName="anonvpn.net"
+
   deploy:
     runs-on: ubuntu-latest
-    needs: [meta, build_test_publish]
+    needs: [meta, build_test_publish, deploy_dns]
     environment: ${{ needs.meta.outputs.env }}
     steps:
       - uses: actions/checkout@v4
@@ -163,7 +179,22 @@ jobs:
           role-to-assume: ${{ needs.meta.outputs.env == 'prod' && secrets.AWS_ROLE_ARN_PROD || secrets.AWS_ROLE_ARN_DEV }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Deploy CloudFormation
+      - name: Resolve DNS stack outputs
+        id: dns
+        run: |
+          set -euo pipefail
+          zone_id="$(aws cloudformation describe-stacks \
+            --stack-name "viktron-dns" \
+            --query "Stacks[0].Outputs[?OutputKey=='HostedZoneId'].OutputValue" \
+            --output text)"
+          cert_arn="$(aws cloudformation describe-stacks \
+            --stack-name "viktron-dns" \
+            --query "Stacks[0].Outputs[?OutputKey=='CertificateArn'].OutputValue" \
+            --output text)"
+          echo "hosted_zone_id=$zone_id" >> "$GITHUB_OUTPUT"
+          echo "certificate_arn=$cert_arn" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy CloudFormation (app)
         run: |
           set -euo pipefail
 
@@ -178,6 +209,9 @@ jobs:
             --parameter-overrides \
               Env="$env" \
               ArtifactBucket="$bucket" \
+              HostedZoneId="${{ steps.dns.outputs.hosted_zone_id }}" \
+              HostedZoneName="anonvpn.net" \
+              CertificateArn="${{ steps.dns.outputs.certificate_arn }}" \
               LayerArtifactKey="${{ needs.build_test_publish.outputs.layer_key }}" \
               LayerArtifactVersion="${{ needs.build_test_publish.outputs.layer_ver }}" \
               AuthArtifactKey="${{ needs.build_test_publish.outputs.auth_key }}" \

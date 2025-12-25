@@ -1,12 +1,13 @@
 import base64
 import json
 import os
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import boto3
 
 cognito = boto3.client("cognito-idp")
 USER_POOL_ID = os.environ["USER_POOL_ID"]
+ADMIN_GROUP = os.environ.get("ADMIN_GROUP", "admins")
 
 
 def _parse_body(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -28,12 +29,60 @@ def _resp(status: int, payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _extract_groups(event: Dict[str, Any]) -> List[str]:
+    """
+    HTTP API (payload v2.0) + JWT authorizer:
+      event.requestContext.authorizer.jwt.claims
+
+    'cognito:groups' can be:
+      - '["admins","..."]' (json string)
+      - 'admins,other' (csv)
+      - 'admins' (single)
+    """
+    rc = event.get("requestContext") or {}
+    authorizer = rc.get("authorizer") or {}
+    jwt = authorizer.get("jwt") or {}
+    claims = jwt.get("claims") or {}
+
+    raw = claims.get("cognito:groups") or claims.get("groups")
+    if not raw:
+        return []
+
+    if isinstance(raw, list):
+        return [str(x).strip() for x in raw if str(x).strip()]
+
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return []
+        if s.startswith("[") and s.endswith("]"):
+            try:
+                arr = json.loads(s)
+                if isinstance(arr, list):
+                    return [str(x).strip() for x in arr if str(x).strip()]
+            except Exception:
+                pass
+        return [g.strip() for g in s.split(",") if g.strip()]
+
+    return []
+
+
+def _is_admin(event: Dict[str, Any]) -> bool:
+    groups = _extract_groups(event)
+    return ADMIN_GROUP in groups
+
+
 def lambda_handler(event, context):
     """
     body:
       email: str
-      tempPassword: str (opcional; si no lo pasas, Cognito la genera)
+      tempPassword: str (optional; if not provided, Cognito generates it)
+
+    Must be called behind API Gateway HTTP API + JWT authorizer.
     """
+    if not _is_admin(event):
+        return _resp(403, {"error": "forbidden", "detail": "admin_only"})
+
     data = _parse_body(event)
     email = data.get("email")
     if not email:
@@ -43,7 +92,7 @@ def lambda_handler(event, context):
         "UserPoolId": USER_POOL_ID,
         "Username": email,
         "UserAttributes": [{"Name": "email", "Value": email}],
-        "DesiredDeliveryMediums": ["EMAIL"],
+        "DesiredDeliveryMediums": ["EMAIL"],  # Cognito handles email delivery/verification
     }
 
     temp_password = data.get("tempPassword")
