@@ -29,6 +29,8 @@ jobs:
 
       - id: out
         run: |
+          set -euo pipefail
+
           bucket="${{ vars.ARTIFACT_BUCKET }}"
           if [[ -z "$bucket" ]]; then
             bucket="${{ secrets.ARTIFACT_BUCKET }}"
@@ -66,6 +68,7 @@ jobs:
 
       - name: Install dev deps + run tests
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           if [[ -f requirements-dev.txt ]]; then
             pip install -r requirements-dev.txt
@@ -81,17 +84,20 @@ jobs:
           rm -rf dist
           mkdir -p dist
 
+          # Layer (python deps)
           mkdir -p dist/layer/python
           if [[ -f requirements.txt ]]; then
             pip install -r requirements.txt -t dist/layer/python
           fi
           (cd dist/layer && zip -r ../python-deps-layer.zip .)
 
+          # Auth lambda zip
           test -f src/auth_lambda.py
           mkdir -p dist/auth
           cp src/auth_lambda.py dist/auth/auth_lambda.py
           (cd dist/auth && zip -r ../auth.zip .)
 
+          # Admin create-user lambda zip
           test -f src/create_user_lambda.py
           mkdir -p dist/admin
           cp src/create_user_lambda.py dist/admin/create_user_lambda.py
@@ -147,24 +153,41 @@ jobs:
   deploy_dns:
     runs-on: ubuntu-latest
     needs: meta
-    if: needs.meta.outputs.env == 'prod'
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure AWS creds (OIDC)
+      # DNS/ACM suelen vivir "globales" en la cuenta, así que uso siempre el role PROD
+      - name: Configure AWS creds (OIDC) - PROD for DNS
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_PROD }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Deploy DNS CloudFormation (HostedZone + Wildcard cert)
+      - name: Ensure DNS stack exists (create once)
         run: |
           set -euo pipefail
+
+          root_domain="${{ vars.ROOT_DOMAIN }}"
+          if [[ -z "$root_domain" ]]; then
+            echo "Missing vars.ROOT_DOMAIN"
+            exit 1
+          fi
+
+          dns_stack="${{ vars.DNS_STACK_NAME }}"
+          if [[ -z "$dns_stack" ]]; then
+            dns_stack="viktron-dns"
+          fi
+
+          if aws cloudformation describe-stacks --stack-name "$dns_stack" >/dev/null 2>&1; then
+            echo "$dns_stack already exists, skipping."
+            exit 0
+          fi
+
           aws cloudformation deploy \
-            --stack-name "viktron-dns" \
+            --stack-name "$dns_stack" \
             --template-file infra/dns.yml \
             --parameter-overrides \
-              HostedZoneName="anonvpn.net"
+              HostedZoneName="$root_domain"
 
   deploy:
     runs-on: ubuntu-latest
@@ -183,14 +206,26 @@ jobs:
         id: dns
         run: |
           set -euo pipefail
+
+          dns_stack="${{ vars.DNS_STACK_NAME }}"
+          if [[ -z "$dns_stack" ]]; then
+            dns_stack="viktron-dns"
+          fi
+
           zone_id="$(aws cloudformation describe-stacks \
-            --stack-name "viktron-dns" \
+            --stack-name "$dns_stack" \
             --query "Stacks[0].Outputs[?OutputKey=='HostedZoneId'].OutputValue" \
             --output text)"
           cert_arn="$(aws cloudformation describe-stacks \
-            --stack-name "viktron-dns" \
+            --stack-name "$dns_stack" \
             --query "Stacks[0].Outputs[?OutputKey=='CertificateArn'].OutputValue" \
             --output text)"
+
+          if [[ -z "$zone_id" || -z "$cert_arn" ]]; then
+            echo "Could not resolve HostedZoneId/CertificateArn from $dns_stack"
+            exit 1
+          fi
+
           echo "hosted_zone_id=$zone_id" >> "$GITHUB_OUTPUT"
           echo "certificate_arn=$cert_arn" >> "$GITHUB_OUTPUT"
 
@@ -202,6 +237,21 @@ jobs:
           stack="viktron-${env}"
           bucket="${{ needs.meta.outputs.artifact_bucket }}"
 
+          root_domain="${{ vars.ROOT_DOMAIN }}"
+          if [[ -z "$root_domain" ]]; then
+            echo "Missing vars.ROOT_DOMAIN"
+            exit 1
+          fi
+
+          if [[ "$env" == "prod" ]]; then
+            allowed_origins="${{ vars.CORS_ALLOWED_ORIGINS_PROD }}"
+          else
+            allowed_origins="${{ vars.CORS_ALLOWED_ORIGINS_DEV }}"
+          fi
+          if [[ -z "$allowed_origins" ]]; then
+            allowed_origins="http://localhost:4200"
+          fi
+
           aws cloudformation deploy \
             --stack-name "$stack" \
             --template-file infra/app.yml \
@@ -210,8 +260,9 @@ jobs:
               Env="$env" \
               ArtifactBucket="$bucket" \
               HostedZoneId="${{ steps.dns.outputs.hosted_zone_id }}" \
-              HostedZoneName="anonvpn.net" \
+              HostedZoneName="$root_domain" \
               CertificateArn="${{ steps.dns.outputs.certificate_arn }}" \
+              AllowedOrigins="$allowed_origins" \
               LayerArtifactKey="${{ needs.build_test_publish.outputs.layer_key }}" \
               LayerArtifactVersion="${{ needs.build_test_publish.outputs.layer_ver }}" \
               AuthArtifactKey="${{ needs.build_test_publish.outputs.auth_key }}" \
