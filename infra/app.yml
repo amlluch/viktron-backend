@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: Viktron backend - Cognito + admin API (HTTP API) + custom domain + lambdas + python deps layer
+Description: Viktron backend - Cognito + admin API (HTTP API) + Hosted UI (OAuth2) + optional Google IdP + custom domain + lambdas + python deps layer
 
 Parameters:
   Env:
@@ -40,8 +40,44 @@ Parameters:
     Type: CommaDelimitedList
     Default: "http://localhost:4200"
 
+  # -------------------------
+  # Frontend URLs (per env)
+  # -------------------------
+  FrontendDevBaseUrl:
+    Type: String
+    Default: "http://localhost:4200"
+
+  # Pon aquí tu CloudFront/app domain cuando lo tengas (ej: https://app.anonvpn.net)
+  FrontendProdBaseUrl:
+    Type: String
+    Default: "https://app.anonvpn.net"
+
+  # -------------------------
+  # Cognito Hosted UI domain prefix (optional)
+  # If empty, we fallback to: viktron-${Env}-${AWS::AccountId}
+  # -------------------------
+  CognitoDomainPrefix:
+    Type: String
+    Default: ""
+
+  # -------------------------
+  # Optional Google IdP (Hosted UI)
+  # If both are non-empty, Google IdP is created and enabled in the client.
+  # -------------------------
+  GoogleClientId:
+    Type: String
+    Default: ""
+  GoogleClientSecret:
+    Type: String
+    NoEcho: true
+    Default: ""
+
 Conditions:
   IsProd: !Equals [!Ref Env, "prod"]
+  HasCognitoDomainPrefix: !Not [!Equals [!Ref CognitoDomainPrefix, ""]]
+  HasGoogle: !And
+    - !Not [!Equals [!Ref GoogleClientId, ""]]
+    - !Not [!Equals [!Ref GoogleClientSecret, ""]]
 
 Resources:
   # -------------------------
@@ -61,16 +97,53 @@ Resources:
           RequireNumbers: true
           RequireSymbols: true
 
+  AdminsGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: "admins"
+      Description: "Viktron administrators"
+      UserPoolId: !Ref UserPool
+
+  # Cognito Hosted UI domain (amazoncognito.com)
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !If
+        - HasCognitoDomainPrefix
+        - !Ref CognitoDomainPrefix
+        - !Sub "viktron-${Env}-${AWS::AccountId}"
+      UserPoolId: !Ref UserPool
+
+  # Optional Google IdP
+  GoogleIdentityProvider:
+    Condition: HasGoogle
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    Properties:
+      ProviderName: Google
+      ProviderType: Google
+      UserPoolId: !Ref UserPool
+      ProviderDetails:
+        client_id: !Ref GoogleClientId
+        client_secret: !Ref GoogleClientSecret
+        authorize_scopes: "openid email profile"
+      AttributeMapping:
+        email: email
+        given_name: given_name
+        family_name: family_name
+
   UserPoolClient:
     Type: AWS::Cognito::UserPoolClient
     Properties:
       UserPoolId: !Ref UserPool
       ClientName: !Sub "viktron-app-client-${Env}"
       GenerateSecret: false
+
+      # Password login (Hosted UI uses this; SRP is fine)
       ExplicitAuthFlows:
         - ALLOW_USER_SRP_AUTH
         - ALLOW_REFRESH_TOKEN_AUTH
-        # - ALLOW_USER_PASSWORD_AUTH  # enable if you want non-SRP client login
+        # - ALLOW_USER_PASSWORD_AUTH  # enable if you also want direct USER_PASSWORD auth (no SRP)
+
       TokenValidityUnits:
         AccessToken: minutes
         IdToken: minutes
@@ -79,12 +152,25 @@ Resources:
       IdTokenValidity: 60
       RefreshTokenValidity: 30
 
-  AdminsGroup:
-    Type: AWS::Cognito::UserPoolGroup
-    Properties:
-      GroupName: "admins"
-      Description: "Viktron administrators"
-      UserPoolId: !Ref UserPool
+      # ---- Hosted UI / OAuth2 (Authorization Code flow) ----
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows: [ code ]
+      AllowedOAuthScopes: [ openid, email, profile ]
+
+      CallbackURLs: !If
+        - IsProd
+        - [ !Sub "${FrontendProdBaseUrl}/auth/callback" ]
+        - [ !Sub "${FrontendDevBaseUrl}/auth/callback" ]
+
+      LogoutURLs: !If
+        - IsProd
+        - [ !Sub "${FrontendProdBaseUrl}/" ]
+        - [ !Sub "${FrontendDevBaseUrl}/" ]
+
+      SupportedIdentityProviders: !If
+        - HasGoogle
+        - [ COGNITO, Google ]
+        - [ COGNITO ]
 
   # -------------------------
   # Layer: python dependencies
@@ -252,7 +338,7 @@ Resources:
       SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/POST/admin/users"
 
   # -------------------------
-  # Custom domain + Route53 record
+  # Custom domain + Route53 record (API)
   # -------------------------
   ApiDomainName:
     Type: AWS::ApiGatewayV2::DomainName
@@ -292,6 +378,23 @@ Outputs:
 
   UserPoolClientId:
     Value: !Ref UserPoolClient
+
+  CognitoHostedUiDomainPrefix:
+    Value: !If
+      - HasCognitoDomainPrefix
+      - !Ref CognitoDomainPrefix
+      - !Sub "viktron-${Env}-${AWS::AccountId}"
+
+  CognitoHostedUiDomain:
+    Value: !Sub
+      - "${Prefix}.auth.${AWS::Region}.amazoncognito.com"
+      - Prefix: !If
+          - HasCognitoDomainPrefix
+          - !Ref CognitoDomainPrefix
+          - !Sub "viktron-${Env}-${AWS::AccountId}"
+
+  CognitoHostedUiIssuer:
+    Value: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}"
 
   ApiEndpointExecuteApi:
     Value: !GetAtt HttpApi.ApiEndpoint
