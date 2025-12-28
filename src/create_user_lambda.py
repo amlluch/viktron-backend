@@ -1,9 +1,13 @@
 import base64
 import json
+import logging
 import os
 from typing import Any, Dict, List
 
 import boto3
+
+log = logging.getLogger()
+log.setLevel(logging.INFO)
 
 cognito = boto3.client("cognito-idp")
 USER_POOL_ID = os.environ["USER_POOL_ID"]
@@ -80,6 +84,9 @@ def lambda_handler(event, context):
 
     Must be called behind API Gateway HTTP API + JWT authorizer.
     """
+    rc = event.get("requestContext") or {}
+    claims = (((rc.get("authorizer") or {}).get("jwt") or {}).get("claims")) or {}
+    log.info("CLAIMS=%s", json.dumps(claims))
     if not _is_admin(event):
         return _resp(403, {"error": "forbidden", "detail": "admin_only"})
 
@@ -91,7 +98,8 @@ def lambda_handler(event, context):
     params = {
         "UserPoolId": USER_POOL_ID,
         "Username": email,
-        "UserAttributes": [{"Name": "email", "Value": email}],
+        "UserAttributes": [{"Name": "email", "Value": email},
+                           {"Name": "email_verified", "Value": "true"}],
         "DesiredDeliveryMediums": ["EMAIL"],  # Cognito handles email delivery/verification
     }
 
