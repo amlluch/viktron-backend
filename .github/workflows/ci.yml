@@ -357,6 +357,16 @@ jobs:
           root_domain="${{ needs.meta.outputs.root_domain }}"
           allowed_origins="${{ needs.meta.outputs.cors_allowed_origins }}"
 
+          google_client_id="${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}"
+          google_client_secret="${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}"
+          extra_params=()
+          if [[ -n "${google_client_id}" && -n "${google_client_secret}" ]]; then
+            extra_params+=("GoogleClientId=${google_client_id}")
+            extra_params+=("GoogleClientSecret=${google_client_secret}")
+          else
+            echo "Google OAuth secrets not set for env=${envname}. Skipping Google IdP."
+          fi
+
           aws cloudformation deploy \
             --stack-name "$stack" \
             --template-file infra/app.yml \
@@ -373,4 +383,5 @@ jobs:
               AuthArtifactKey="${{ needs.build_test_publish.outputs.auth_key }}" \
               AuthArtifactVersion="${{ needs.build_test_publish.outputs.auth_ver }}" \
               AdminArtifactKey="${{ needs.build_test_publish.outputs.admin_key }}" \
-              AdminArtifactVersion="${{ needs.build_test_publish.outputs.admin_ver }}"
+              AdminArtifactVersion="${{ needs.build_test_publish.outputs.admin_ver }}" \
+              "${extra_params[@]}"
