@@ -34,15 +34,6 @@ def _resp(status: int, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _extract_groups(event: Dict[str, Any]) -> List[str]:
-    """
-    HTTP API (payload v2.0) + JWT authorizer:
-      event.requestContext.authorizer.jwt.claims
-
-    'cognito:groups' can be:
-      - '["admins","..."]' (json string)
-      - 'admins,other' (csv)
-      - 'admins' (single)
-    """
     rc = event.get("requestContext") or {}
     authorizer = rc.get("authorizer") or {}
     jwt = authorizer.get("jwt") or {}
@@ -52,24 +43,39 @@ def _extract_groups(event: Dict[str, Any]) -> List[str]:
     if not raw:
         return []
 
+    # If already a list
     if isinstance(raw, list):
         return [str(x).strip() for x in raw if str(x).strip()]
 
+    # Most common: string
     if isinstance(raw, str):
         s = raw.strip()
         if not s:
             return []
+
+        # Case A: proper JSON list: ["admins","other"]
         if s.startswith("[") and s.endswith("]"):
+            # Try JSON first
             try:
                 arr = json.loads(s)
                 if isinstance(arr, list):
                     return [str(x).strip() for x in arr if str(x).strip()]
             except Exception:
                 pass
+
+            # Case B: bracketed but NOT JSON: [admins] or [admins,other]
+            inner = s[1:-1].strip()
+            if not inner:
+                return []
+            parts = [p.strip() for p in inner.split(",") if p.strip()]
+            # remove optional quotes around items
+            cleaned = [p.strip('"').strip("'").strip() for p in parts]
+            return [c for c in cleaned if c]
+
+        # Case C: CSV string: "admins,other"
         return [g.strip() for g in s.split(",") if g.strip()]
 
     return []
-
 
 def _is_admin(event: Dict[str, Any]) -> bool:
     groups = _extract_groups(event)
