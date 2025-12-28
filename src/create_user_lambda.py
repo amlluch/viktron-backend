@@ -119,5 +119,11 @@ def lambda_handler(event, context):
         return _resp(200, {"email": email, "status": status})
     except cognito.exceptions.UsernameExistsException:
         return _resp(409, {"error": "user_already_exists"})
+    except cognito.exceptions.InvalidPasswordException as e:
+        return _resp(400, {"error": "invalid_password", "detail": str(e)})
+    except cognito.exceptions.InvalidParameterException as e:
+        return _resp(400, {"error": "invalid_parameter", "detail": str(e)})
+    except cognito.exceptions.TooManyRequestsException as e:
+        return _resp(429, {"error": "too_many_requests", "detail": str(e)})
     except Exception as e:
         return _resp(500, {"error": "internal_error", "detail": str(e)})
