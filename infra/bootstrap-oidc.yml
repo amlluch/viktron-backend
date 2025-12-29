@@ -1,16 +1,30 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: GitHub OIDC provider + deploy roles (dev/prod) + versioned artifacts bucket
+Description: GitHub OIDC provider + deploy roles (backend dev/prod) + versioned artifacts bucket + frontend site buckets + frontend deploy roles
 
 Parameters:
   GitHubOrg:
     Type: String
-    Description: GitHub org/user (owner)
+    Description: "GitHub org/user (owner). Example: amlluch"
   GitHubRepo:
     Type: String
     Description: GitHub repo name (e.g. viktron-backend)
+
   ArtifactBucketName:
     Type: String
     Description: Globally-unique S3 bucket name for build artifacts (versioned)
+
+  # ---- FRONTEND (optional but recommended) ----
+  FrontendRepo:
+    Type: String
+    Default: "viktron-workspace"
+    Description: GitHub repo name for frontend (e.g. viktron-workspace)
+
+  FrontendDevBucketName:
+    Type: String
+    Description: Globally-unique S3 bucket for DEV frontend site (private, for CloudFront)
+  FrontendProdBucketName:
+    Type: String
+    Description: Globally-unique S3 bucket for PROD frontend site (private, for CloudFront)
 
 Resources:
   GitHubOidcProvider:
@@ -43,7 +57,7 @@ Resources:
             AbortIncompleteMultipartUpload:
               DaysAfterInitiation: 7
 
-  # ---- DEV ROLE ----
+  # ---- DEV ROLE (backend) ----
   GitHubDeployRoleDev:
     Type: AWS::IAM::Role
     Properties:
@@ -60,14 +74,12 @@ Resources:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
                 token.actions.githubusercontent.com:sub:
-                  # jobs without GitHub Environments
                   - !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/*"
-                  # jobs with GitHub Environments
                   - !Sub "repo:${GitHubOrg}/${GitHubRepo}:environment:dev"
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AdministratorAccess
 
-  # ---- PROD ROLE ----
+  # ---- PROD ROLE (backend) ----
   GitHubDeployRoleProd:
     Type: AWS::IAM::Role
     Properties:
@@ -90,10 +102,148 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AdministratorAccess
 
+  # =====================================================================
+  # FRONTEND site buckets (private; CloudFront will read them later)
+  # =====================================================================
+
+  FrontendSiteBucketDev:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref FrontendDevBucketName
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireNonCurrentVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
+          - Id: AbortMultipart
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+
+  FrontendSiteBucketProd:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref FrontendProdBucketName
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireNonCurrentVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
+          - Id: AbortMultipart
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+
+  # =====================================================================
+  # FRONTEND deploy roles (OIDC) - least privilege: S3 sync only
+  # =====================================================================
+
+  GitHubFrontendDeployRoleDev:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "viktron-frontend-github-deploy-dev-${GitHubOrg}-${FrontendRepo}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref GitHubOidcProvider
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub:
+                  - !Sub "repo:${GitHubOrg}/${FrontendRepo}:ref:refs/heads/*"
+                  - !Sub "repo:${GitHubOrg}/${FrontendRepo}:environment:dev"
+      Policies:
+        - PolicyName: DeployFrontendDevToS3
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ListBucket
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource: !Sub "arn:aws:s3:::${FrontendDevBucketName}"
+              - Sid: WriteObjects
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:GetObject
+                  - s3:PutObjectTagging
+                Resource: !Sub "arn:aws:s3:::${FrontendDevBucketName}/*"
+
+  GitHubFrontendDeployRoleProd:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "viktron-frontend-github-deploy-prod-${GitHubOrg}-${FrontendRepo}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref GitHubOidcProvider
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub:
+                  - !Sub "repo:${GitHubOrg}/${FrontendRepo}:environment:prod"
+                  - !Sub "repo:${GitHubOrg}/${FrontendRepo}:ref:refs/tags/v*"
+                  - !Sub "repo:${GitHubOrg}/${FrontendRepo}:ref:refs/tags/*.*.*"
+      Policies:
+        - PolicyName: DeployFrontendProdToS3
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ListBucket
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource: !Sub "arn:aws:s3:::${FrontendProdBucketName}"
+              - Sid: WriteObjects
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:GetObject
+                  - s3:PutObjectTagging
+                Resource: !Sub "arn:aws:s3:::${FrontendProdBucketName}/*"
+
 Outputs:
   ArtifactsBucketName:
     Value: !Ref ArtifactsBucket
+
   DeployRoleArnDev:
     Value: !GetAtt GitHubDeployRoleDev.Arn
   DeployRoleArnProd:
     Value: !GetAtt GitHubDeployRoleProd.Arn
+
+  FrontendDevBucketName:
+    Value: !Ref FrontendSiteBucketDev
+  FrontendProdBucketName:
+    Value: !Ref FrontendSiteBucketProd
+
+  FrontendDeployRoleArnDev:
+    Value: !GetAtt GitHubFrontendDeployRoleDev.Arn
+  FrontendDeployRoleArnProd:
+    Value: !GetAtt GitHubFrontendDeployRoleProd.Arn
