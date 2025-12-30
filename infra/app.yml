@@ -36,21 +36,23 @@ Parameters:
     Type: String
     Description: "ACM certificate ARN for *.anonvpn.net (from viktron-dns stack)"
 
+  # CORS (API Gateway HTTP API)
+  # En DEV: local + dev web
+  # En PROD: prod web
   AllowedOrigins:
     Type: CommaDelimitedList
-    Default: "http://localhost:4200"
+    Default: "http://localhost:4200,https://dev.anonvpn.net,https://anonvpn.net"
 
   # -------------------------
   # Frontend URLs (per env)
   # -------------------------
   FrontendDevBaseUrl:
     Type: String
-    Default: "http://localhost:4200"
+    Default: "https://dev.anonvpn.net"
 
-  # Pon aquí tu CloudFront/app domain cuando lo tengas (ej: https://app.anonvpn.net)
   FrontendProdBaseUrl:
     Type: String
-    Default: "https://app.anonvpn.net"
+    Default: "https://anonvpn.net"
 
   # -------------------------
   # Cognito Hosted UI domain prefix (optional)
@@ -104,7 +106,6 @@ Resources:
       Description: "Viktron administrators"
       UserPoolId: !Ref UserPool
 
-  # Cognito Hosted UI domain (amazoncognito.com)
   UserPoolDomain:
     Type: AWS::Cognito::UserPoolDomain
     Properties:
@@ -114,7 +115,6 @@ Resources:
         - !Sub "viktron-${Env}-${AWS::AccountId}"
       UserPoolId: !Ref UserPool
 
-  # Optional Google IdP
   GoogleIdentityProvider:
     Condition: HasGoogle
     Type: AWS::Cognito::UserPoolIdentityProvider
@@ -138,11 +138,9 @@ Resources:
       ClientName: !Sub "viktron-app-client-${Env}"
       GenerateSecret: false
 
-      # Password login (Hosted UI uses this; SRP is fine)
       ExplicitAuthFlows:
         - ALLOW_USER_SRP_AUTH
         - ALLOW_REFRESH_TOKEN_AUTH
-        # - ALLOW_USER_PASSWORD_AUTH  # enable if you also want direct USER_PASSWORD auth (no SRP)
 
       TokenValidityUnits:
         AccessToken: minutes
@@ -152,20 +150,27 @@ Resources:
       IdTokenValidity: 60
       RefreshTokenValidity: 30
 
-      # ---- Hosted UI / OAuth2 (Authorization Code flow) ----
       AllowedOAuthFlowsUserPoolClient: true
       AllowedOAuthFlows: [ code ]
       AllowedOAuthScopes: [ openid, email, profile ]
 
+      # DEV: local + dev web
+      # PROD: prod web
       CallbackURLs: !If
         - IsProd
         - [ !Sub "${FrontendProdBaseUrl}/auth/callback" ]
-        - [ !Sub "${FrontendDevBaseUrl}/auth/callback" ]
+        - [
+            "http://localhost:4200/auth/callback",
+            !Sub "${FrontendDevBaseUrl}/auth/callback"
+          ]
 
       LogoutURLs: !If
         - IsProd
         - [ !Sub "${FrontendProdBaseUrl}/" ]
-        - [ !Sub "${FrontendDevBaseUrl}/" ]
+        - [
+            "http://localhost:4200/",
+            !Sub "${FrontendDevBaseUrl}/"
+          ]
 
       SupportedIdentityProviders: !If
         - HasGoogle
