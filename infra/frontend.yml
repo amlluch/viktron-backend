@@ -94,6 +94,7 @@ Resources:
             Condition:
               StringEquals:
                 AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${FrontendDistribution}"
+                AWS:SourceAccount: !Ref AWS::AccountId
 
   FrontendAliasRecord:
     Type: AWS::Route53::RecordSet
