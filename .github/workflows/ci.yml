@@ -28,52 +28,68 @@ jobs:
       root_domain: ${{ steps.out.outputs.root_domain }}
       dns_stack: ${{ steps.out.outputs.dns_stack }}
       cors_allowed_origins: ${{ steps.out.outputs.cors_allowed_origins }}
+
+      # frontend
+      frontend_bucket: ${{ steps.out.outputs.frontend_bucket }}
+      frontend_domain: ${{ steps.out.outputs.frontend_domain }}
+      cloudfront_cert_arn: ${{ steps.out.outputs.cloudfront_cert_arn }}
+      frontend_stack: ${{ steps.out.outputs.frontend_stack }}
+
     steps:
       - uses: actions/checkout@v4
 
       - id: out
+        shell: bash
         run: |
           set -euo pipefail
 
-          # Artifact bucket
+          # REQUIRED existing repo vars
           bucket="${{ vars.ARTIFACT_BUCKET }}"
-          if [[ -z "$bucket" ]]; then
-            bucket="${{ secrets.ARTIFACT_BUCKET }}"
-          fi
-          if [[ -z "$bucket" ]]; then
-            echo "Missing ARTIFACT_BUCKET (vars or secrets)"
-            exit 1
-          fi
-
-          # Root domain
           root_domain="${{ vars.ROOT_DOMAIN }}"
-          if [[ -z "$root_domain" ]]; then
-            echo "Missing vars.ROOT_DOMAIN"
-            exit 1
-          fi
+          if [[ -z "$bucket" ]]; then echo "Missing vars.ARTIFACT_BUCKET"; exit 1; fi
+          if [[ -z "$root_domain" ]]; then echo "Missing vars.ROOT_DOMAIN"; exit 1; fi
 
-          # DNS stack name (optional)
           dns_stack="${{ vars.DNS_STACK_NAME }}"
-          if [[ -z "$dns_stack" ]]; then
-            dns_stack="viktron-dns"
-          fi
+          if [[ -z "$dns_stack" ]]; then dns_stack="viktron-dns"; fi
 
-          # env + version + CORS
           ref="${GITHUB_REF}"
           if [[ "$ref" == refs/tags/* ]]; then
             envname="prod"
             version="${ref#refs/tags/}"
             cors="${{ vars.CORS_ALLOWED_ORIGINS_PROD }}"
+            frontend_bucket="${{ vars.FRONTEND_PROD_BUCKET }}"
+            frontend_domain="${{ vars.FRONTEND_PROD_DOMAIN }}"
+            frontend_stack="${{ vars.FRONTEND_STACK_NAME_PROD }}"
+            if [[ -z "$frontend_stack" ]]; then frontend_stack="viktron-frontend-prod"; fi
           else
             envname="dev"
             branch="${ref#refs/heads/}"
             safe_branch="$(echo "$branch" | tr '/_.' '-' )"
             version="${safe_branch}-${GITHUB_SHA::7}"
             cors="${{ vars.CORS_ALLOWED_ORIGINS_DEV }}"
+            frontend_bucket="${{ vars.FRONTEND_DEV_BUCKET }}"
+            frontend_domain="${{ vars.FRONTEND_DEV_DOMAIN }}"
+            frontend_stack="${{ vars.FRONTEND_STACK_NAME_DEV }}"
+            if [[ -z "$frontend_stack" ]]; then frontend_stack="viktron-frontend-dev"; fi
           fi
 
-          if [[ -z "$cors" ]]; then
-            cors="http://localhost:4200"
+          if [[ -z "$cors" ]]; then cors="http://localhost:4200"; fi
+
+          # REQUIRED new repo var (CloudFront cert in us-east-1)
+          cloudfront_cert_arn="${{ vars.CLOUDFRONT_CERT_ARN }}"
+          if [[ -z "$cloudfront_cert_arn" ]]; then
+            echo "Missing vars.CLOUDFRONT_CERT_ARN (ACM cert ARN in us-east-1 for CloudFront)"
+            exit 1
+          fi
+
+          # REQUIRED new repo vars (bucket + domain)
+          if [[ -z "$frontend_bucket" ]]; then
+            echo "Missing FRONTEND_*_BUCKET (vars.FRONTEND_DEV_BUCKET / vars.FRONTEND_PROD_BUCKET)"
+            exit 1
+          fi
+          if [[ -z "$frontend_domain" ]]; then
+            echo "Missing FRONTEND_*_DOMAIN (vars.FRONTEND_DEV_DOMAIN / vars.FRONTEND_PROD_DOMAIN)"
+            exit 1
           fi
 
           echo "env=$envname" >> "$GITHUB_OUTPUT"
@@ -82,6 +98,11 @@ jobs:
           echo "root_domain=$root_domain" >> "$GITHUB_OUTPUT"
           echo "dns_stack=$dns_stack" >> "$GITHUB_OUTPUT"
           echo "cors_allowed_origins=$cors" >> "$GITHUB_OUTPUT"
+
+          echo "frontend_bucket=$frontend_bucket" >> "$GITHUB_OUTPUT"
+          echo "frontend_domain=$frontend_domain" >> "$GITHUB_OUTPUT"
+          echo "cloudfront_cert_arn=$cloudfront_cert_arn" >> "$GITHUB_OUTPUT"
+          echo "frontend_stack=$frontend_stack" >> "$GITHUB_OUTPUT"
 
   build_test_publish:
     runs-on: ubuntu-latest
@@ -136,55 +157,6 @@ jobs:
           mkdir -p dist/admin
           cp src/create_user_lambda.py dist/admin/create_user_lambda.py
           (cd dist/admin && zip -r ../admin_create_user.zip .)
-
-      # --- OIDC DEBUG (non-fatal) ---
-      - name: Debug OIDC token claims (non-fatal)
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" || -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]]; then
-            echo "OIDC env vars not available (missing id-token: write?)"
-            exit 0
-          fi
-
-          url="$ACTIONS_ID_TOKEN_REQUEST_URL"
-          sep="?"
-          if [[ "$url" == *"?"* ]]; then sep="&"; fi
-          req_url="${url}${sep}audience=sts.amazonaws.com"
-
-          resp="$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$req_url" || true)"
-          if [[ -z "$resp" ]]; then
-            echo "OIDC token response is empty"
-            exit 0
-          fi
-
-          python - <<'PY' "$resp"
-          import json, sys, base64
-          raw = sys.argv[1]
-          try:
-            obj = json.loads(raw)
-          except Exception as e:
-            print("OIDC response is not JSON:", raw[:200])
-            raise
-          
-          token = obj.get("value")
-          if not token:
-            print("No 'value' in response:", obj)
-            sys.exit(0)
-          
-          parts = token.split(".")
-          if len(parts) < 2:
-            print("Token does not look like JWT")
-            sys.exit(0)
-          
-          payload = parts[1]
-          payload += "=" * ((4 - len(payload) % 4) % 4)
-          claims = json.loads(base64.urlsafe_b64decode(payload))
-          print("aud:", claims.get("aud"))
-          print("sub:", claims.get("sub"))
-          PY
 
       - name: Configure AWS creds (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -242,7 +214,6 @@ jobs:
       - name: Configure AWS creds (OIDC) - DNS
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          # Use the matching role for the env (avoids assuming PROD role during dev)
           role-to-assume: ${{ needs.meta.outputs.env == 'prod' && vars.AWS_ROLE_ARN_PROD || vars.AWS_ROLE_ARN_DEV }}
           aws-region: ${{ env.AWS_REGION }}
 
@@ -262,60 +233,14 @@ jobs:
             --stack-name "$dns_stack" \
             --template-file infra/dns.yml \
             --parameter-overrides \
-              HostedZoneName="$root_domain" \
-            --capabilities CAPABILITY_NAMED_IAM
+              HostedZoneName="$root_domain"
 
   deploy:
     runs-on: ubuntu-latest
     needs: [meta, build_test_publish, deploy_dns]
-    environment: ${{ needs.meta.outputs.env }}
+    environment: ${{ needs.meta.outputs.env }} # IMPORTANT: this must match your GH env names: dev / prod
     steps:
       - uses: actions/checkout@v4
-
-      # --- OIDC DEBUG (non-fatal) ---
-      - name: Debug OIDC token claims (non-fatal)
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" || -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]]; then
-            echo "OIDC env vars not available (missing id-token: write?)"
-            exit 0
-          fi
-
-          url="$ACTIONS_ID_TOKEN_REQUEST_URL"
-          sep="?"
-          if [[ "$url" == *"?"* ]]; then sep="&"; fi
-          req_url="${url}${sep}audience=sts.amazonaws.com"
-
-          resp="$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$req_url" || true)"
-          if [[ -z "$resp" ]]; then
-            echo "OIDC token response is empty"
-            exit 0
-          fi
-
-          python - <<'PY' "$resp"
-          import json, sys, base64
-          raw = sys.argv[1]
-          try:
-            obj = json.loads(raw)
-          except Exception:
-            print("OIDC response is not JSON:", raw[:200])
-            sys.exit(0)
-          
-          token = obj.get("value")
-          if not token:
-            print("No 'value' in response:", obj)
-            sys.exit(0)
-          
-          parts = token.split(".")
-          payload = parts[1]
-          payload += "=" * ((4 - len(payload) % 4) % 4)
-          claims = json.loads(base64.urlsafe_b64decode(payload))
-          print("aud:", claims.get("aud"))
-          print("sub:", claims.get("sub"))
-          PY
 
       - name: Configure AWS creds (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -334,20 +259,22 @@ jobs:
             --stack-name "$dns_stack" \
             --query "Stacks[0].Outputs[?OutputKey=='HostedZoneId'].OutputValue" \
             --output text)"
-          cert_arn="$(aws cloudformation describe-stacks \
+
+          # NOTE: your dns.yml certificate is eu-west-1; good for ALB/APIGW, NOT for CloudFront
+          cert_euw1="$(aws cloudformation describe-stacks \
             --stack-name "$dns_stack" \
             --query "Stacks[0].Outputs[?OutputKey=='CertificateArn'].OutputValue" \
             --output text)"
 
-          if [[ -z "$zone_id" || -z "$cert_arn" ]]; then
-            echo "Could not resolve HostedZoneId/CertificateArn from $dns_stack"
+          if [[ -z "$zone_id" ]]; then
+            echo "Could not resolve HostedZoneId from $dns_stack"
             exit 1
           fi
 
           echo "hosted_zone_id=$zone_id" >> "$GITHUB_OUTPUT"
-          echo "certificate_arn=$cert_arn" >> "$GITHUB_OUTPUT"
+          echo "certificate_arn_euw1=$cert_euw1" >> "$GITHUB_OUTPUT"
 
-      - name: Deploy CloudFormation (app)
+      - name: Deploy CloudFormation (backend app)
         run: |
           set -euo pipefail
 
@@ -376,7 +303,7 @@ jobs:
               ArtifactBucket="$bucket" \
               HostedZoneId="${{ steps.dns.outputs.hosted_zone_id }}" \
               HostedZoneName="$root_domain" \
-              CertificateArn="${{ steps.dns.outputs.certificate_arn }}" \
+              CertificateArn="${{ steps.dns.outputs.certificate_arn_euw1 }}" \
               AllowedOrigins="$allowed_origins" \
               LayerArtifactKey="${{ needs.build_test_publish.outputs.layer_key }}" \
               LayerArtifactVersion="${{ needs.build_test_publish.outputs.layer_ver }}" \
@@ -385,3 +312,22 @@ jobs:
               AdminArtifactKey="${{ needs.build_test_publish.outputs.admin_key }}" \
               AdminArtifactVersion="${{ needs.build_test_publish.outputs.admin_ver }}" \
               "${extra_params[@]}"
+
+      - name: Deploy CloudFormation (frontend CloudFront)
+        run: |
+          set -euo pipefail
+
+          envname="${{ needs.meta.outputs.env }}"
+          stack="${{ needs.meta.outputs.frontend_stack }}"
+          root_domain="${{ needs.meta.outputs.root_domain }}"
+
+          aws cloudformation deploy \
+            --stack-name "$stack" \
+            --template-file infra/frontend.yml \
+            --parameter-overrides \
+              Env="$envname" \
+              HostedZoneId="${{ steps.dns.outputs.hosted_zone_id }}" \
+              HostedZoneName="$root_domain" \
+              SiteBucketName="${{ needs.meta.outputs.frontend_bucket }}" \
+              SiteDomainName="${{ needs.meta.outputs.frontend_domain }}" \
+              CertificateArnUsEast1="${{ needs.meta.outputs.cloudfront_cert_arn }}"

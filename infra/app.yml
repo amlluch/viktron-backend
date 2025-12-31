@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: Viktron backend - Cognito + admin API (HTTP API) + Hosted UI (OAuth2) + optional Google IdP + custom domain + lambdas + python deps layer
+Description: Viktron backend - Cognito + admin API (HTTP API) + Hosted UI (OAuth2) + optional Google IdP + custom domain + lambdas + python deps layer + frontend (S3+CloudFront)
 
 Parameters:
   Env:
@@ -34,11 +34,14 @@ Parameters:
 
   CertificateArn:
     Type: String
-    Description: "ACM certificate ARN for *.anonvpn.net (from viktron-dns stack)"
+    Description: "ACM certificate ARN for *.anonvpn.net in eu-west-1 (API custom domain). From viktron-dns stack."
+
+  # CloudFront certificates MUST be in us-east-1
+  FrontendCertificateArnUsEast1:
+    Type: String
+    Description: "ACM certificate ARN in us-east-1 that covers anonvpn.net + *.anonvpn.net (for CloudFront)."
 
   # CORS (API Gateway HTTP API)
-  # En DEV: local + dev web
-  # En PROD: prod web
   AllowedOrigins:
     Type: CommaDelimitedList
     Default: "http://localhost:4200,https://dev.anonvpn.net,https://anonvpn.net"
@@ -54,9 +57,17 @@ Parameters:
     Type: String
     Default: "https://anonvpn.net"
 
+  # Optional: if you want explicit bucket names (otherwise we generate them)
+  FrontendDevBucketName:
+    Type: String
+    Default: ""
+
+  FrontendProdBucketName:
+    Type: String
+    Default: ""
+
   # -------------------------
   # Cognito Hosted UI domain prefix (optional)
-  # If empty, we fallback to: viktron-${Env}-${AWS::AccountId}
   # -------------------------
   CognitoDomainPrefix:
     Type: String
@@ -64,7 +75,6 @@ Parameters:
 
   # -------------------------
   # Optional Google IdP (Hosted UI)
-  # If both are non-empty, Google IdP is created and enabled in the client.
   # -------------------------
   GoogleClientId:
     Type: String
@@ -80,6 +90,8 @@ Conditions:
   HasGoogle: !And
     - !Not [!Equals [!Ref GoogleClientId, ""]]
     - !Not [!Equals [!Ref GoogleClientSecret, ""]]
+  HasFrontendDevBucketName: !Not [!Equals [!Ref FrontendDevBucketName, ""]]
+  HasFrontendProdBucketName: !Not [!Equals [!Ref FrontendProdBucketName, ""]]
 
 Resources:
   # -------------------------
@@ -154,8 +166,6 @@ Resources:
       AllowedOAuthFlows: [ code ]
       AllowedOAuthScopes: [ openid, email, profile ]
 
-      # DEV: local + dev web
-      # PROD: prod web
       CallbackURLs: !If
         - IsProd
         - [ !Sub "${FrontendProdBaseUrl}/auth/callback" ]
@@ -377,6 +387,130 @@ Resources:
         DNSName: !GetAtt ApiDomainName.RegionalDomainName
         HostedZoneId: !GetAtt ApiDomainName.RegionalHostedZoneId
 
+  # =========================
+  # Frontend: S3 + CloudFront
+  # =========================
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !If
+        - IsProd
+        - !If
+          - HasFrontendProdBucketName
+          - !Ref FrontendProdBucketName
+          - !Sub "viktron-web-prod-${AWS::AccountId}-${AWS::Region}"
+        - !If
+          - HasFrontendDevBucketName
+          - !Ref FrontendDevBucketName
+          - !Sub "viktron-web-dev-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  FrontendOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "viktron-frontend-oac-${Env}"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "Viktron frontend ${Env}"
+        DefaultRootObject: "index.html"
+        PriceClass: PriceClass_100
+        HttpVersion: http2
+        IPV6Enabled: true
+
+        Aliases: !If
+          - IsProd
+          - [ !Sub "${HostedZoneName}" ]
+          - [ !Sub "dev.${HostedZoneName}" ]
+
+        Origins:
+          - Id: frontend-s3
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            S3OriginConfig: {}
+            OriginAccessControlId: !Ref FrontendOriginAccessControl
+
+        DefaultCacheBehavior:
+          TargetOriginId: frontend-s3
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [ GET, HEAD, OPTIONS ]
+          CachedMethods: [ GET, HEAD, OPTIONS ]
+          Compress: true
+          CachePolicyId: "658327ea-f89d-4fab-a63d-7e88639e58f6" # Managed-CachingOptimized
+
+        CustomErrorResponses:
+          # SPA routing: /admin/users, /hello, /auth/callback...
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: "/index.html"
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: "/index.html"
+            ErrorCachingMinTTL: 0
+
+        ViewerCertificate:
+          AcmCertificateArn: !Ref FrontendCertificateArnUsEast1
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+
+  # Allow CloudFront (OAC) to read from the bucket
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontRead
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: "s3:GetObject"
+            Resource: !Sub "arn:aws:s3:::${FrontendBucket}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${FrontendDistribution}"
+
+  # Route53 -> CloudFront (A + AAAA)
+  FrontendRecordA:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !If
+        - IsProd
+        - !Sub "${HostedZoneName}"
+        - !Sub "dev.${HostedZoneName}"
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt FrontendDistribution.DomainName
+        HostedZoneId: "Z2FDTNDATAQYW2"
+
+  FrontendRecordAAAA:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !If
+        - IsProd
+        - !Sub "${HostedZoneName}"
+        - !Sub "dev.${HostedZoneName}"
+      Type: AAAA
+      AliasTarget:
+        DNSName: !GetAtt FrontendDistribution.DomainName
+        HostedZoneId: "Z2FDTNDATAQYW2"
+
 Outputs:
   UserPoolId:
     Value: !Ref UserPool
@@ -415,3 +549,18 @@ Outputs:
       - IsProd
       - !Sub "https://api.${HostedZoneName}/admin/users"
       - !Sub "https://api-dev.${HostedZoneName}/admin/users"
+
+  FrontendBucketName:
+    Value: !Ref FrontendBucket
+
+  FrontendCloudFrontDistributionId:
+    Value: !Ref FrontendDistribution
+
+  FrontendCloudFrontDomainName:
+    Value: !GetAtt FrontendDistribution.DomainName
+
+  FrontendUrl:
+    Value: !If
+      - IsProd
+      - !Sub "https://${HostedZoneName}"
+      - !Sub "https://dev.${HostedZoneName}"
