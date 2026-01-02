@@ -141,6 +141,9 @@ jobs:
 
           # Layer (python deps)
           mkdir -p dist/layer/python
+          echo "---- requirements.txt ----"
+          cat requirements.txt
+          echo "--------------------------"
           if [[ -f requirements.txt ]]; then
             pip install -r requirements.txt -t dist/layer/python
           fi
