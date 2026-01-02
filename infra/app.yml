@@ -239,6 +239,8 @@ Resources:
                   - cognito-idp:AdminDisableUser
                   - cognito-idp:AdminResetUserPassword
                   - cognito-idp:AdminSetUserPassword
+                  - cognito-idp:AdminRemoveUserFromGroup
+                  - cognito-idp:AdminDeleteUser
                 Resource: !GetAtt UserPool.Arn
 
   # -------------------------
@@ -326,6 +328,25 @@ Resources:
       FunctionName: !Sub "viktron-admin-update-user-${Env}"
       Runtime: python3.12
       Handler: update_user_lambda.lambda_handler
+      Role: !GetAtt AdminLambdaRole.Arn
+      Timeout: 15
+      MemorySize: 256
+      Layers: [ !Ref PythonDepsLayer ]
+      Environment:
+        Variables:
+          USER_POOL_ID: !Ref UserPool
+          ADMIN_GROUP: "admins"
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref AdminArtifactKey
+        S3ObjectVersion: !Ref AdminArtifactVersion
+
+  AdminDeleteUserLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "viktron-admin-delete-user-${Env}"
+      Runtime: python3.12
+      Handler: delete_user_lambda.lambda_handler
       Role: !GetAtt AdminLambdaRole.Arn
       Timeout: 15
       MemorySize: 256
@@ -499,6 +520,31 @@ Resources:
       FunctionName: !Ref AdminUpdateUserLambda
       Principal: "apigateway.amazonaws.com"
       SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/PATCH/admin/users/*"
+
+  AdminDeleteUserIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt AdminDeleteUserLambda.Arn
+      PayloadFormatVersion: "2.0"
+
+  AdminDeleteUserRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "DELETE /admin/users/{username}"
+      Target: !Sub "integrations/${AdminDeleteUserIntegration}"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+
+  AllowApiInvokeAdminDeleteUser:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !Ref AdminDeleteUserLambda
+      Principal: "apigateway.amazonaws.com"
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/DELETE/admin/users/*"
 
   # -------------------------
   # Custom domain + Route53 record (API)
