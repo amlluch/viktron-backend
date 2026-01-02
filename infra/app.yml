@@ -233,6 +233,12 @@ Resources:
                   - cognito-idp:AdminAddUserToGroup
                   - cognito-idp:AdminGetUser
                   - cognito-idp:ListUsers
+                  - cognito-idp:AdminListGroupsForUser
+                  - cognito-idp:AdminUpdateUserAttributes
+                  - cognito-idp:AdminEnableUser
+                  - cognito-idp:AdminDisableUser
+                  - cognito-idp:AdminResetUserPassword
+                  - cognito-idp:AdminSetUserPassword
                 Resource: !GetAtt UserPool.Arn
 
   # -------------------------
@@ -270,7 +276,64 @@ Resources:
       Environment:
         Variables:
           USER_POOL_ID: !Ref UserPool
-          ADMINS_GROUP: "admins"
+          ADMIN_GROUP: "admins"
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref AdminArtifactKey
+        S3ObjectVersion: !Ref AdminArtifactVersion
+
+  AdminListUsersLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "viktron-admin-list-users-${Env}"
+      Runtime: python3.12
+      Handler: list_users_lambda.handler
+      Role: !GetAtt AdminLambdaRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Layers: [ !Ref PythonDepsLayer ]
+      Environment:
+        Variables:
+          USER_POOL_ID: !Ref UserPool
+          ADMIN_GROUP: "admins"
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref AdminArtifactKey
+        S3ObjectVersion: !Ref AdminArtifactVersion
+
+  AdminGetUserLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "viktron-admin-get-user-${Env}"
+      Runtime: python3.12
+      Handler: get_user_lambda.handler
+      Role: !GetAtt AdminLambdaRole.Arn
+      Timeout: 15
+      MemorySize: 256
+      Layers: [ !Ref PythonDepsLayer ]
+      Environment:
+        Variables:
+          USER_POOL_ID: !Ref UserPool
+          ADMIN_GROUP: "admins"
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref AdminArtifactKey
+        S3ObjectVersion: !Ref AdminArtifactVersion
+
+  AdminUpdateUserLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "viktron-admin-update-user-${Env}"
+      Runtime: python3.12
+      Handler: update_user_lambda.handler
+      Role: !GetAtt AdminLambdaRole.Arn
+      Timeout: 15
+      MemorySize: 256
+      Layers: [ !Ref PythonDepsLayer ]
+      Environment:
+        Variables:
+          USER_POOL_ID: !Ref UserPool
+          ADMIN_GROUP: "admins"
       Code:
         S3Bucket: !Ref ArtifactBucket
         S3Key: !Ref AdminArtifactKey
@@ -286,7 +349,7 @@ Resources:
       ProtocolType: HTTP
       CorsConfiguration:
         AllowOrigins: !Ref AllowedOrigins
-        AllowMethods: [ GET, POST, OPTIONS ]
+        AllowMethods: [ GET, POST, PATCH, OPTIONS ]
         AllowHeaders: [ authorization, content-type ]
         AllowCredentials: true
         MaxAge: 3600
@@ -336,7 +399,7 @@ Resources:
       Principal: "apigateway.amazonaws.com"
       SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/POST/auth"
 
-  # ---- Admin endpoint (JWT) ----
+  # ---- Admin endpoints (JWT) ----
   AdminCreateUserIntegration:
     Type: AWS::ApiGatewayV2::Integration
     Properties:
@@ -361,6 +424,81 @@ Resources:
       FunctionName: !Ref AdminCreateUserLambda
       Principal: "apigateway.amazonaws.com"
       SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/POST/admin/users"
+
+  AdminListUsersIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt AdminListUsersLambda.Arn
+      PayloadFormatVersion: "2.0"
+
+  AdminListUsersRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /admin/users"
+      Target: !Sub "integrations/${AdminListUsersIntegration}"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+
+  AllowApiInvokeAdminListUsers:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !Ref AdminListUsersLambda
+      Principal: "apigateway.amazonaws.com"
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/GET/admin/users"
+
+  AdminGetUserIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt AdminGetUserLambda.Arn
+      PayloadFormatVersion: "2.0"
+
+  AdminGetUserRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /admin/users/{username}"
+      Target: !Sub "integrations/${AdminGetUserIntegration}"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+
+  AllowApiInvokeAdminGetUser:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !Ref AdminGetUserLambda
+      Principal: "apigateway.amazonaws.com"
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/GET/admin/users/*"
+
+  AdminUpdateUserIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt AdminUpdateUserLambda.Arn
+      PayloadFormatVersion: "2.0"
+
+  AdminUpdateUserRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "PATCH /admin/users/{username}"
+      Target: !Sub "integrations/${AdminUpdateUserIntegration}"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+
+  AllowApiInvokeAdminUpdateUser:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !Ref AdminUpdateUserLambda
+      Principal: "apigateway.amazonaws.com"
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/PATCH/admin/users/*"
 
   # -------------------------
   # Custom domain + Route53 record (API)
@@ -435,3 +573,9 @@ Outputs:
       - IsProd
       - !Sub "https://api.${HostedZoneName}/admin/users"
       - !Sub "https://api-dev.${HostedZoneName}/admin/users"
+
+  AdminUserDetailEndpoint:
+    Value: !If
+      - IsProd
+      - !Sub "https://api.${HostedZoneName}/admin/users/{username}"
+      - !Sub "https://api-dev.${HostedZoneName}/admin/users/{username}"

@@ -1,0 +1,341 @@
+openapi: 3.0.3
+info:
+  title: Viktron Admin API
+  version: "1.0.0"
+
+servers:
+  - url: https://api-dev.anonvpn.net
+    description: dev
+  - url: https://api.anonvpn.net
+    description: prod
+
+tags:
+  - name: AdminUsers
+    description: Admin user management (Cognito)
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+        detail:
+          oneOf:
+            - type: string
+            - type: object
+            - type: array
+      required: [error]
+
+    CreateUserRequest:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+        tempPassword:
+          type: string
+      required: [email]
+
+    CreateUserResponse:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+        status:
+          type: string
+      required: [email, status]
+
+    UserListItem:
+      type: object
+      properties:
+        username:
+          type: string
+        email:
+          type: string
+          nullable: true
+        enabled:
+          type: boolean
+        status:
+          type: string
+          nullable: true
+        created:
+          type: string
+          format: date-time
+          nullable: true
+        modified:
+          type: string
+          format: date-time
+          nullable: true
+      required: [username, enabled]
+
+    ListUsersResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/UserListItem"
+        nextPaginationToken:
+          type: string
+          nullable: true
+      required: [items]
+
+    UserDetailResponse:
+      type: object
+      properties:
+        username:
+          type: string
+        enabled:
+          type: boolean
+        status:
+          type: string
+          nullable: true
+        created:
+          type: string
+          format: date-time
+          nullable: true
+        modified:
+          type: string
+          format: date-time
+          nullable: true
+        attributes:
+          type: object
+          additionalProperties:
+            type: string
+        groups:
+          type: array
+          items:
+            type: string
+        isAdmin:
+          type: boolean
+      required: [username, enabled, attributes, groups, isAdmin]
+
+    UpdateUserRequest:
+      type: object
+      properties:
+        attributes:
+          type: object
+          description: >
+            Attributes to update. Allowed: phone_number, given_name, family_name, name,
+            preferred_username, locale, picture, profile, website, address, birthdate, gender,
+            updated_at, and any custom:* attribute. email/sub are blocked by default.
+          additionalProperties: true
+        enabled:
+          type: boolean
+          nullable: true
+        resetPassword:
+          type: boolean
+          default: false
+        tempPassword:
+          type: string
+          nullable: true
+        permanentPassword:
+          type: boolean
+          default: false
+
+    UpdateUserResponse:
+      type: object
+      properties:
+        username:
+          type: string
+        enabled:
+          type: boolean
+        status:
+          type: string
+          nullable: true
+        attributes:
+          type: object
+          additionalProperties:
+            type: string
+      required: [username, enabled, attributes]
+
+security:
+  - bearerAuth: []
+
+paths:
+  /admin/users:
+    get:
+      tags: [AdminUsers]
+      summary: List non-admin users
+      description: Returns only users that are NOT in the admins group.
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 60
+            default: 50
+        - in: query
+          name: paginationToken
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListUsersResponse"
+        "403":
+          description: Admin only
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    post:
+      tags: [AdminUsers]
+      summary: Create user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateUserRequest"
+      responses:
+        "200":
+          description: Created (Cognito returns status)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateUserResponse"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Admin only
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: User already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Throttled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /admin/users/{username}:
+    get:
+      tags: [AdminUsers]
+      summary: Get user detail
+      parameters:
+        - in: path
+          name: username
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserDetailResponse"
+        "403":
+          description: Admin only
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: User not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    patch:
+      tags: [AdminUsers]
+      summary: Update user (blocked for admins)
+      parameters:
+        - in: path
+          name: username
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateUserRequest"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpdateUserResponse"
+        "400":
+          description: Bad request (invalid attributes, etc.)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Admin only
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: User not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Cannot modify admin user (protected)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Throttled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"

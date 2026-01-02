@@ -152,10 +152,16 @@ jobs:
           cp src/auth_lambda.py dist/auth/auth_lambda.py
           (cd dist/auth && zip -r ../auth.zip .)
 
-          # Admin create-user lambda zip
+          # Admin lambdas zip (create + list + get + update)
           test -f src/create_user_lambda.py
+          test -f src/list_users_lambda.py
+          test -f src/get_user_lambda.py
+          test -f src/update_user_lambda.py
           mkdir -p dist/admin
           cp src/create_user_lambda.py dist/admin/create_user_lambda.py
+          cp src/list_users_lambda.py dist/admin/list_users_lambda.py
+          cp src/get_user_lambda.py dist/admin/get_user_lambda.py
+          cp src/update_user_lambda.py dist/admin/update_user_lambda.py
           (cd dist/admin && zip -r ../admin_create_user.zip .)
 
       - name: Configure AWS creds (OIDC)

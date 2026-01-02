@@ -10,6 +10,7 @@ log = logging.getLogger()
 log.setLevel(logging.INFO)
 
 cognito = boto3.client("cognito-idp")
+
 USER_POOL_ID = os.environ["USER_POOL_ID"]
 ADMIN_GROUP = os.environ.get("ADMIN_GROUP", "admins")
 
@@ -43,19 +44,15 @@ def _extract_groups(event: Dict[str, Any]) -> List[str]:
     if not raw:
         return []
 
-    # If already a list
     if isinstance(raw, list):
         return [str(x).strip() for x in raw if str(x).strip()]
 
-    # Most common: string
     if isinstance(raw, str):
         s = raw.strip()
         if not s:
             return []
 
-        # Case A: proper JSON list: ["admins","other"]
         if s.startswith("[") and s.endswith("]"):
-            # Try JSON first
             try:
                 arr = json.loads(s)
                 if isinstance(arr, list):
@@ -63,23 +60,20 @@ def _extract_groups(event: Dict[str, Any]) -> List[str]:
             except Exception:
                 pass
 
-            # Case B: bracketed but NOT JSON: [admins] or [admins,other]
             inner = s[1:-1].strip()
             if not inner:
                 return []
             parts = [p.strip() for p in inner.split(",") if p.strip()]
-            # remove optional quotes around items
             cleaned = [p.strip('"').strip("'").strip() for p in parts]
             return [c for c in cleaned if c]
 
-        # Case C: CSV string: "admins,other"
         return [g.strip() for g in s.split(",") if g.strip()]
 
     return []
 
+
 def _is_admin(event: Dict[str, Any]) -> bool:
-    groups = _extract_groups(event)
-    return ADMIN_GROUP in groups
+    return ADMIN_GROUP in _extract_groups(event)
 
 
 def lambda_handler(event, context):
@@ -93,6 +87,7 @@ def lambda_handler(event, context):
     rc = event.get("requestContext") or {}
     claims = (((rc.get("authorizer") or {}).get("jwt") or {}).get("claims")) or {}
     log.info("CLAIMS=%s", json.dumps(claims))
+
     if not _is_admin(event):
         return _resp(403, {"error": "forbidden", "detail": "admin_only"})
 
@@ -104,9 +99,11 @@ def lambda_handler(event, context):
     params = {
         "UserPoolId": USER_POOL_ID,
         "Username": email,
-        "UserAttributes": [{"Name": "email", "Value": email},
-                           {"Name": "email_verified", "Value": "true"}],
-        "DesiredDeliveryMediums": ["EMAIL"],  # Cognito handles email delivery/verification
+        "UserAttributes": [
+            {"Name": "email", "Value": email},
+            {"Name": "email_verified", "Value": "true"},
+        ],
+        "DesiredDeliveryMediums": ["EMAIL"],
     }
 
     temp_password = data.get("tempPassword")
