@@ -4,4 +4,4 @@ isort==5.10.1
 flake8==6.0.0
 mypy==0.971
 pytest==7.3.1
-boto3-stubs[full] ==1.42.16
+boto3-stubs[cognito-idp] ==1.42.19
