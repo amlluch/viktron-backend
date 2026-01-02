@@ -249,7 +249,7 @@ Resources:
     Properties:
       FunctionName: !Sub "viktron-auth-${Env}"
       Runtime: python3.12
-      Handler: auth_lambda.handler
+      Handler: auth_lambda.lambda_handler
       Role: !GetAtt AuthLambdaRole.Arn
       Timeout: 15
       MemorySize: 256
@@ -268,7 +268,7 @@ Resources:
     Properties:
       FunctionName: !Sub "viktron-admin-create-user-${Env}"
       Runtime: python3.12
-      Handler: create_user_lambda.handler
+      Handler: create_user_lambda.lambda_handler
       Role: !GetAtt AdminLambdaRole.Arn
       Timeout: 15
       MemorySize: 256
@@ -287,7 +287,7 @@ Resources:
     Properties:
       FunctionName: !Sub "viktron-admin-list-users-${Env}"
       Runtime: python3.12
-      Handler: list_users_lambda.handler
+      Handler: list_users_lambda.lambda_handler
       Role: !GetAtt AdminLambdaRole.Arn
       Timeout: 30
       MemorySize: 256
@@ -306,7 +306,7 @@ Resources:
     Properties:
       FunctionName: !Sub "viktron-admin-get-user-${Env}"
       Runtime: python3.12
-      Handler: get_user_lambda.handler
+      Handler: get_user_lambda.lambda_handler
       Role: !GetAtt AdminLambdaRole.Arn
       Timeout: 15
       MemorySize: 256
@@ -325,7 +325,7 @@ Resources:
     Properties:
       FunctionName: !Sub "viktron-admin-update-user-${Env}"
       Runtime: python3.12
-      Handler: update_user_lambda.handler
+      Handler: update_user_lambda.lambda_handler
       Role: !GetAtt AdminLambdaRole.Arn
       Timeout: 15
       MemorySize: 256
